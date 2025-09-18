@@ -24,33 +24,33 @@ logger = logging.getLogger(__name__)
 
 
 class BGEM3Embedder(BaseEmbedder, nn.Module):
-    def __init__(self, model_name_or_path: str, pooling_method: str, max_length: int, dense_dim: int,
-                 use_sparse: bool = True, colbert_dim: int = None):
+    def __init__(self, model_name_or_path: str, use_dense: bool = True, dense_pooling: str = 'cls', dense_dim: int = 512, use_sparse: bool = True):
         super(BGEM3Embedder, self).__init__()
-        
+
         config = AutoConfig.from_pretrained(model_name_or_path)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
         self.vocab_size = config.vocab_size
         
         self.bert = AutoModel.from_pretrained(model_name_or_path, config=config, add_pooling_layer=False)
         self.hidden_size = config.hidden_size
-        self.pooling_method = pooling_method
+        self.dense_pooling = dense_pooling
+        self.use_dense = use_dense
         self.dense_dim = dense_dim
         self.use_sparse = use_sparse
-        self.colbert_dim = colbert_dim
-        self.use_colbert = True if colbert_dim else False
         self.normalize_embeddings = True
-        self.max_length = max_length
 
-        self.dense_linear = torch.nn.Linear(
-            config.hidden_size,
-            dense_dim if dense_dim > 0 else config.hidden_size
-        )
-        dense_state_fpath = os.path.join(model_name_or_path, 'dense_linear.pt')
-        if os.path.exists(dense_state_fpath):    
-            dense_state_dict = torch.load(dense_state_fpath, map_location='cpu', weights_only=True)
-            self.dense_linear.load_state_dict(dense_state_dict)
-            logger.info("dense linear checkpoint loaded.")
+        assert use_dense or use_sparse
+
+        if use_dense:
+            self.dense_linear = torch.nn.Linear(
+                config.hidden_size,
+                dense_dim if dense_dim > 0 else config.hidden_size
+            )
+            dense_state_fpath = os.path.join(model_name_or_path, 'dense_linear.pt')
+            if os.path.exists(dense_state_fpath):    
+                dense_state_dict = torch.load(dense_state_fpath, map_location='cpu', weights_only=True)
+                self.dense_linear.load_state_dict(dense_state_dict)
+                logger.info("dense linear checkpoint loaded.")
 
         if use_sparse:
             self.sparse_linear = torch.nn.Linear(
@@ -78,15 +78,15 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
         Returns:
             torch.Tensor: The dense embeddings.
         """
-        if self.pooling_method == "cls":
+        if self.dense_pooling == "cls":
             logits = last_hidden_state[:, 0]
-        elif self.pooling_method == "mean":
+        elif self.dense_pooling == "mean":
             s = torch.sum(
                 last_hidden_state * attention_mask.unsqueeze(-1).float(), dim=1
             )
             d = attention_mask.sum(dim=1, keepdim=True).float()
             logits = s / d
-        elif self.pooling_method == "last_token":
+        elif self.dense_pooling == "last_token":
             left_padding = attention_mask[:, -1].sum() == attention_mask.shape[0]
             if left_padding:
                 logits = last_hidden_state[:, -1]
@@ -98,7 +98,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                     sequence_lengths,
                 ]
         else:
-            raise NotImplementedError(f"pooling method {self.pooling_method} not implemented")
+            raise NotImplementedError(f"pooling method {self.dense_pooling} not implemented")
         logits = self.dense_linear(logits)
         if self.normalize_embeddings:
             logits = F.normalize(logits, dim=-1)
@@ -171,14 +171,21 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
     def gradient_checkpointing_enable(self):
         self.bert.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
     
-    def forward(self, input_ids, attention_mask, token_type_ids=None, return_sparse_vectors=True, return_sparse_weights=False):
-        model_out = self.bert(input_ids, attention_mask, token_type_ids, output_hidden_states=True, return_dict=True)
-        dense_vectors = self._dense_embedding(model_out.last_hidden_state, attention_mask)
+    def forward(self, bert_inputs, return_sparse_weights=False):
+        input_ids = bert_inputs['input_ids']
+        attention_mask = bert_inputs.get('attention_mask', None)
+        token_type_ids = bert_inputs.get('token_type_ids', None)
         
-        res = {
-            'dense_vectors': dense_vectors
-        }
-        if self.use_sparse and return_sparse_vectors:
+        model_out = self.bert(input_ids, attention_mask, token_type_ids, output_hidden_states=True, return_dict=True)
+        
+        # TODO: 定义一个Embedding模型的标准输出
+        res = dict()
+        
+        if self.use_dense:
+            dense_vectors = self._dense_embedding(model_out.last_hidden_state, attention_mask)
+            res['dense_vectors'] = dense_vectors
+
+        if self.use_sparse:
             res['sparse_vectors'] = self._sparse_embedding(model_out.last_hidden_state, input_ids)
         
         if self.use_sparse and return_sparse_weights:
@@ -186,7 +193,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
         
         return res
     
-    def encode(self, texts: List[str], max_length: int = -1, batch_size: int = 4000) -> Dict[str, Union[np.ndarray, None]]:
+    def encode(self, texts: List[str], max_length: int = 512, batch_size: int = 4000) -> Dict[str, Union[np.ndarray, None]]:
         """
         Encode a list of text strings into embeddings.
         
@@ -262,3 +269,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
             torch.save(_trans_state_dict(self.sparse_linear.state_dict()),
                        os.path.join(output_dir, 'sparse_linear.pt'))
             logger.info(f"sparse linear saved to {os.path.join(output_dir, 'sparse_linear.pt')}")
+    
+
+# def get_representation(model_output):
+#     return model_output['dense_vectors']

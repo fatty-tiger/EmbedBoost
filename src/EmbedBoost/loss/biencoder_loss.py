@@ -8,48 +8,19 @@ class InbatchNegInfoNCELoss(nn.Module):
     def __init__(self):
         super(InbatchNegInfoNCELoss, self).__init__()
 
-    def forward(self, q_encoded, p_encoded, temperature=0.05, offset=0, use_sparse=False, sparse_weight=0.3, self_distill=False, distill_weight=0.2):
-        q_dense_vecs, p_dense_vecs = q_encoded['dense_vectors'], p_encoded['dense_vectors']
-        bsz = q_dense_vecs.shape[0]
-        targets = torch.arange(bsz).to(q_dense_vecs.device)
+    def forward(self, q_vectors, p_vectors, temperature=0.05, offset=0):
+        bsz = q_vectors.shape[0]
+        targets = torch.arange(bsz).to(q_vectors.device)
         if offset > 0:
             targets = targets.add(offset)
 
-        ret_dict = {}
-
-        dense_scores = torch.mm(q_dense_vecs, p_dense_vecs.transpose(1, 0))
-        dense_scores = dense_scores / temperature
-        dense_loss = F.cross_entropy(dense_scores, targets, reduction='mean')
-        ret_dict['dense_loss'] = dense_loss
-        loss = dense_loss
-        
-        if use_sparse:
-            q_sparse_vecs, p_sparse_vecs = q_encoded['sparse_vectors'], p_encoded['sparse_vectors']
-            sparse_scores = torch.mm(q_sparse_vecs, p_sparse_vecs.transpose(1,0))
-            sparse_scores = sparse_scores / temperature
-            sparse_loss = F.cross_entropy(sparse_scores, targets, reduction='mean')
-            ret_dict['sparse_loss'] = sparse_loss
-            loss += sparse_loss * sparse_weight
-
-        if self_distill:
-            ensemble_scores = dense_scores + sparse_scores
-            teacher_targets = torch.softmax(ensemble_scores.detach(), dim=-1)            
-            
-            dense_self_distill_loss = F.cross_entropy(dense_scores, teacher_targets, reduction='mean')
-            loss += distill_weight * dense_self_distill_loss
-            ret_dict['dense_self_distill_loss'] = dense_self_distill_loss
-            
-            sparse_self_distill_loss = F.cross_entropy(sparse_scores, teacher_targets, reduction='mean')
-            loss += distill_weight * sparse_self_distill_loss
-            ret_dict['sparse_self_distill_loss'] = sparse_self_distill_loss
-        
-        ret_dict['loss'] = loss
-        
-        return ret_dict
+        scores = torch.mm(q_vectors, p_vectors.transpose(1, 0))
+        scores = scores / temperature
+        loss = F.cross_entropy(scores, targets, reduction='mean')
+        return loss
 
 
 class CommonInfoNCELoss(nn.Module):
-    """监督模式In-Batch损失"""
     def __init__(self):
         super(CommonInfoNCELoss, self).__init__()
 

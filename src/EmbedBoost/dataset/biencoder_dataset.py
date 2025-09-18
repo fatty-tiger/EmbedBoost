@@ -3,10 +3,11 @@ from torch.utils.data import Dataset
 from EmbedBoost.common import file_util
 
 
-class DualEncoderDataset(Dataset):
-    def __init__(self, data_fpath_or_list, tokenizer, max_len, mode):
+class BiEncoderDataset(Dataset):
+    def __init__(self, data_fpath_or_list, tokenizer, max_query_length, max_doc_length, mode):
         self.tokenizer = tokenizer
-        self.max_len = max_len
+        self.max_query_length = max_query_length
+        self.max_doc_length = max_doc_length
         self.mode = mode
         if isinstance(data_fpath_or_list, str):
             data_fpath_or_list = [data_fpath_or_list]
@@ -28,10 +29,10 @@ class DualEncoderDataset(Dataset):
                 querys.append(x['query'])
                 positives.append(x['positive'])
             
-            feed_dict_a = self.tokenizer(querys, max_length=self.max_len, add_special_tokens=True,
+            feed_dict_a = self.tokenizer(querys, max_length=self.max_query_length, add_special_tokens=True,
                                         padding='max_length', return_tensors='pt', truncation=True,
                                         return_attention_mask=True, return_token_type_ids=False)
-            feed_dict_b = self.tokenizer(positives, max_length=self.max_len, add_special_tokens=True,
+            feed_dict_b = self.tokenizer(positives, max_length=self.max_doc_length, add_special_tokens=True,
                                         padding='max_length', return_tensors='pt', truncation=True,
                                         return_attention_mask=True, return_token_type_ids=False)
             
@@ -46,13 +47,13 @@ class DualEncoderDataset(Dataset):
                 positives.append(x['positive_text'])
                 negatives.extend(x['negative_texts'][:self.group_size-1])
             
-            feed_dict_q = self.tokenizer(querys, max_length=self.max_len, add_special_tokens=True,
+            feed_dict_q = self.tokenizer(querys, max_length=self.max_query_length, add_special_tokens=True,
                                         padding='max_length', return_tensors='pt', truncation=True,
                                         return_attention_mask=True, return_token_type_ids=False)
-            feed_dict_pos = self.tokenizer(positives, max_length=self.max_len, add_special_tokens=True,
+            feed_dict_pos = self.tokenizer(positives, max_length=self.max_doc_length, add_special_tokens=True,
                                         padding='max_length', return_tensors='pt', truncation=True,
                                         return_attention_mask=True, return_token_type_ids=False)
-            feed_dict_neg = self.tokenizer(negatives, max_length=self.max_len, add_special_tokens=True,
+            feed_dict_neg = self.tokenizer(negatives, max_length=self.max_doc_length, add_special_tokens=True,
                                         padding='max_length', return_tensors='pt', truncation=True,
                                         return_attention_mask=True, return_token_type_ids=False)
             return feed_dict_q, feed_dict_pos, feed_dict_neg
