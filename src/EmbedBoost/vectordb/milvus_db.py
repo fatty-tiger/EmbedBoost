@@ -18,13 +18,15 @@ logger = logging.getLogger(__name__)
 
 
 class MilvusVectorStore(BaseVectorStore):
-    def __init__(self, milvus_db_uri: str, col_name: str, dense_dim: int):
+    def __init__(self, milvus_db_uri: str, col_name: str, use_dense: bool, dense_dim: int, use_sparse: bool):
         self.milvus_db_uri = milvus_db_uri
         self.client = MilvusClient(milvus_db_uri)
         self.col_name = col_name
+        self.use_dense = use_dense
         self.dense_dim = dense_dim
+        self.use_sparse = use_sparse
     
-    def create_collection(self, use_sparse=False, mode='overwrite') -> None:
+    def create_collection(self, mode='overwrite') -> None:
         col_name = self.col_name
         
         if mode == 'overwrite':
@@ -39,19 +41,21 @@ class MilvusVectorStore(BaseVectorStore):
         fields = [
             FieldSchema(name="pk", dtype=DataType.VARCHAR, is_primary=True, max_length=100),
             FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=512),
-            FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR, dim=self.dense_dim),
         ]
-        if use_sparse:
+        if self.use_dense:
+            fields.append(FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR, dim=self.dense_dim))
+        if self.use_sparse:
             fields.append(FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR))
         schema = CollectionSchema(fields)
         
         index_params = self.client.prepare_index_params()
-        index_params.add_index(
-            field_name="dense_vector",
-            index_type="FLAT",
-            metric_type="IP"
-        )
-        if use_sparse:
+        if self.use_dense:
+            index_params.add_index(
+                field_name="dense_vector",
+                index_type="FLAT",
+                metric_type="IP"
+            )
+        if self.use_sparse:
             index_params.add_index(
                 field_name="sparse_vector",
                 index_type="SPARSE_INVERTED_INDEX",
@@ -76,21 +80,23 @@ class MilvusVectorStore(BaseVectorStore):
         Returns:
             Any: Vector index (implementation-specific)
         """
-        use_sparse = embedder.use_sparse
-        self.create_collection(use_sparse=use_sparse, mode=mode)
+        self.create_collection(mode=mode)
         
         insert_count = 0
         for _, batch_docs in batch_generator(documents, batch_size=batch_size):
             batched_entities = []
             texts = [x['text'] for x in batch_docs]
             encoded = embedder.encode(texts, max_length=max_length)
-            dense_vectors = encoded['dense_vectors'].tolist()
+            if self.use_dense:
+                dense_vectors = encoded['dense_vectors'].tolist()
             for i, doc in enumerate(batch_docs):
                 entity = {
                     "pk": doc['pk'],
                     "text": doc['text'],
-                    "dense_vector": dense_vectors[i],
+                    #"dense_vector": dense_vectors[i],
                 }
+                if self.use_dense:
+                    entity['dense_vector'] = dense_vectors[i]
                 if embedder.use_sparse:
                     entity['sparse_vector'] = encoded['sparse_weights'][i]
                 batched_entities.append(entity)

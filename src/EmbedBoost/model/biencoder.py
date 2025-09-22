@@ -21,14 +21,10 @@ class BiEncoder:
             q_encoder: nn.Module,
             p_encoder: nn.Module,
             loss_fn: Callable[..., Dict[str, Tensor]],
-            q_max_seq_length: int = 512,
-            p_max_seq_length: int = 512,
             get_rep_fn: Callable[..., Tensor] = None
     ):
         self.q_encoder = q_encoder
         self.p_encoder = p_encoder
-        self.q_max_seq_length = q_max_seq_length
-        self.p_max_seq_length = p_max_seq_length
         self.loss_fn = loss_fn
         self.get_rep_fn = get_rep_fn
     

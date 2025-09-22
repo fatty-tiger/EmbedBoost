@@ -62,12 +62,9 @@ def build_loss_func(args):
     raise ValueError(f"unknown negative_mode: {args.negative_mode}")
 
 
-def get_dense_reps(model_output):
-    return model_output['dense_vectors']
-
-def get_sparse_reps(model_output):
+def get_rep_fn(model_output):
+    #return model_output['dense_vectors']
     return model_output['sparse_vectors']
-
 
 
 def train(args):
@@ -83,12 +80,14 @@ def train(args):
     tokenizer = model.tokenizer
 
     training_state_checkpoint = None
-    training_state_fpath = os.path.join(args.model_name_or_path, "training-state-ckp.pt")
-    if os.path.exists(training_state_fpath):
+    if args.resume_from_checkpoint:
+        training_state_fpath = os.path.join(args.model_name_or_path, "training-state-ckp.pt")
+        if not os.path.exists(training_state_fpath):
+            raise ValueError(f"training state checkpoint not found: {training_state_fpath}")
         training_state_checkpoint = torch.load(training_state_fpath)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-    if training_state_checkpoint:
+    if args.resume_from_checkpoint:
         optimizer.load_state_dict(training_state_checkpoint['optimizer_state_dict'])
         logger.info("optimizer state loaded.")
     
@@ -118,25 +117,21 @@ def train(args):
             chunk_size=args.cache_chunk_size,
             loss_fn=loss_func,
             split_input_fn=None,
-            get_rep_fn=get_sparse_reps
+            get_rep_fn=get_rep_fn
         )
     else:
         biencoder = BiEncoder(
             q_encoder=model,
             p_encoder=model,
             loss_fn=loss_func,
-            get_rep_fn=get_sparse_reps
+            get_rep_fn=get_rep_fn
         )
     
-    last_epoch = training_state_checkpoint['epoch'] if training_state_checkpoint else 0
-    step = training_state_checkpoint['step'] if training_state_checkpoint else 0
+    last_epoch = training_state_checkpoint['epoch'] if args.resume_from_checkpoint else 0
+    step = training_state_checkpoint['step'] if args.resume_from_checkpoint else 0
 
     model_kwargs = {}
     loss_kwargs = {}
-    # loss_kwargs = {
-    #     'use_sparse': args.use_sparse,
-    #     'self_distill': args.self_distill
-    # }
 
     for epoch in range(last_epoch+1, args.train_epochs+1):
         # loss_list = []
@@ -205,6 +200,11 @@ def main():
         "--model_name_or_path",
         type=str,
         help="预训练模型路径或HuggingFace模型名称"
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        action="store_true",
+        help="是否继续训练"
     )
     parser.add_argument(
         "--use_dense",

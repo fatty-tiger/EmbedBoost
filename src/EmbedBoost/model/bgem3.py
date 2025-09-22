@@ -51,6 +51,8 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                 dense_state_dict = torch.load(dense_state_fpath, map_location='cpu', weights_only=True)
                 self.dense_linear.load_state_dict(dense_state_dict)
                 logger.info("dense linear checkpoint loaded.")
+            else:
+                logger.warn("dense linear weights were not found, random initialized.")
 
         if use_sparse:
             self.sparse_linear = torch.nn.Linear(
@@ -61,9 +63,9 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
             if os.path.exists(sparse_state_fpath):    
                 sparse_state_dict = torch.load(sparse_state_fpath, map_location='cpu', weights_only=True)
                 self.sparse_linear.load_state_dict(sparse_state_dict)
-                logger.info("sparse linear checkpoint loaded.")
+                logger.info("sparse linear weights loaded.")
             else:
-                logger.warn("sparse linear checkpoint not found.")
+                logger.warn("sparse linear weights were not found, random initialized.")
 
     def _dense_embedding(self, last_hidden_state, attention_mask):
         """Use the pooling method to get the dense embedding.
@@ -228,24 +230,28 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                 ).to(device)
 
                 res = self.forward(
-                    input_ids=encoded['input_ids'],
-                    attention_mask=encoded['attention_mask'],
-                    return_sparse_vectors=False,
+                    # input_ids=encoded['input_ids'],
+                    # attention_mask=encoded['attention_mask'],
+                    encoded,
                     return_sparse_weights=True
                 )
-                dense_vecs_list.append(res['dense_vectors'])
+                if 'dense_vectors' in res:
+                    dense_vecs_list.append(res['dense_vectors'])
                 if "sparse_weights" in res:
                     sparse_weights_list.extend(res['sparse_weights'])
         
-        if len(dense_vecs_list) > 1:
-            dense_vectors = torch.cat(dense_vecs_list, dim=0)
-        else:
-            dense_vectors = dense_vecs_list[0]
+        ret_dict = {}
+        if len(dense_vecs_list) > 0:
+            if len(dense_vecs_list) == 1:
+                dense_vectors = dense_vecs_list[0]
+            elif len(dense_vecs_list) > 1:
+                dense_vectors = torch.cat(dense_vecs_list, dim=0)
+            ret_dict['dense_vectors'] = dense_vectors.cpu().numpy()
 
-        return {
-            "dense_vectors": dense_vectors.cpu().numpy(),
-            "sparse_weights": sparse_weights_list
-        }
+        if sparse_weights_list:
+            ret_dict['sparse_weights'] = sparse_weights_list
+
+        return ret_dict
     
     def save(self, output_dir: str):
         def _trans_state_dict(state_dict):
@@ -261,9 +267,10 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
         self.tokenizer.save_pretrained(output_dir)
         logger.info(f"tokenizer saved to {output_dir}")
         
-        torch.save(_trans_state_dict(self.dense_linear.state_dict()),
-                   os.path.join(output_dir, 'dense_linear.pt'))
-        logger.info(f"dense linear saved to {os.path.join(output_dir, 'dense_linear.pt')}")
+        if self.use_dense:
+            torch.save(_trans_state_dict(self.dense_linear.state_dict()),
+                       os.path.join(output_dir, 'dense_linear.pt'))
+            logger.info(f"dense linear saved to {os.path.join(output_dir, 'dense_linear.pt')}")
         
         if self.use_sparse:
             torch.save(_trans_state_dict(self.sparse_linear.state_dict()),
