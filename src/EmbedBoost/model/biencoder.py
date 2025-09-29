@@ -28,17 +28,16 @@ class BiEncoder:
         self.loss_fn = loss_fn
         self.get_rep_fn = get_rep_fn
     
-    def __call__(self, q_inputs, p_inputs, model_kwargs, loss_kwargs):
+    def __call__(self, q_inputs, p_inputs, n_inputs, model_kwargs, loss_kwargs):
         q_encoded = self.q_encoder(q_inputs, **model_kwargs)
         p_encoded = self.p_encoder(p_inputs, **model_kwargs)
         q_vectors = self.get_rep_fn(q_encoded)
         p_vectors = self.get_rep_fn(p_encoded)
-        loss = self.loss_fn(q_vectors, p_vectors, **loss_kwargs)
-        # if not isinstance(loss_dict, dict):
-        #     raise TypeError("loss fn output type must be Dict[str, Tensor]")
-        # if not 'loss' in loss_dict:
-        #     raise KeyError("'loss' must be in loss dict")
-
+        n_vectors = None
+        if n_inputs is not None:
+            n_encoded = self.p_encoder(n_inputs, **model_kwargs)
+            n_vectors = self.get_rep_fn(n_encoded)
+        loss = self.loss_fn(q_vectors, p_vectors, n_vectors=n_vectors, **loss_kwargs)
         # backward一定要在这里做吗？
         loss.backward()
         return loss
@@ -75,11 +74,9 @@ class BiEncoderWithGradCache:
         :param fp16: If True, run mixed precision training, which requires scaler to also be set.
         :param scaler: A GradScaler object for automatic mixed precision training.
         """
-        self.models = [q_encoder, p_encoder]
         self.q_encoder = q_encoder
         self.p_encoder = p_encoder
 
-        # self.chunk_sizes = [q_chunk_size, p_chunk_size]
         self.chunk_size = chunk_size
 
         self.split_input_fn = split_input_fn
@@ -94,26 +91,39 @@ class BiEncoderWithGradCache:
 
         self._get_input_tensors_strict = False
 
-    def __call__(self, q_inputs, p_inputs, model_kwargs, loss_kwargs, no_sync_except_last=False):
+    def __call__(self, q_inputs, p_inputs, n_inputs, model_kwargs, loss_kwargs, no_sync_except_last=False):
         if no_sync_except_last:
-            assert all(map(lambda m: isinstance(m, nn.parallel.DistributedDataParallel), self.models)), \
-                'Some of models are not wrapped in DistributedDataParallel. Make sure you are running DDP with ' \
-                'proper initializations.'
+            assert isinstance(self.q_encoder, nn.parallel.DistributedDataParallel)
+            assert isinstance(self.p_encoder, nn.parallel.DistributedDataParallel)
+            # assert all(map(lambda m: isinstance(m, nn.parallel.DistributedDataParallel), self.models)), \
+            #     'Some of models are not wrapped in DistributedDataParallel. Make sure you are running DDP with ' \
+            #     'proper initializations.'
         
         q_inputs = self.split_inputs(q_inputs, self.chunk_size)
         p_inputs = self.split_inputs(p_inputs, self.chunk_size)
+        if n_inputs is not None:
+            # logger.info(f"n_inputs: {n_inputs['input_ids'].shape}")
+            n_inputs = self.split_inputs(n_inputs, self.chunk_size)
+            # logger.info(f"n_inputs after split: {n_inputs[0]['input_ids'].shape}")
 
         q_reps, q_rnd_states = self.forward_no_grad(self.q_encoder, q_inputs, model_kwargs)
         p_reps, p_rnd_states = self.forward_no_grad(self.p_encoder, p_inputs, model_kwargs)
+        n_reps, n_rnd_states = None, None
+        if n_inputs is not None:
+            n_reps, n_rnd_states = self.forward_no_grad(self.p_encoder, n_inputs, model_kwargs)
 
-        q_cache, p_cache, loss = self.build_cache(q_reps, p_reps, **loss_kwargs)
+        q_cache, p_cache, n_cache, loss = self.build_cache(q_reps, p_reps, n_reps, **loss_kwargs)
         
         # 关键步骤：split cache
         q_cache = q_cache.split(self.chunk_size)
         p_cache = p_cache.split(self.chunk_size)
-
+        if n_cache is not None:
+            n_cache = n_cache.split(self.chunk_size)
+        
         self.forward_backward(self.q_encoder, q_inputs, q_cache, q_rnd_states, model_kwargs, no_sync_except_last=no_sync_except_last)
         self.forward_backward(self.p_encoder, p_inputs, p_cache, p_rnd_states, model_kwargs, no_sync_except_last=no_sync_except_last)
+        if n_inputs is not None:
+            self.forward_backward(self.p_encoder, n_inputs, n_cache, n_rnd_states, model_kwargs, no_sync_except_last=no_sync_except_last)
 
         return loss
 
@@ -208,7 +218,7 @@ class BiEncoderWithGradCache:
         model_reps = torch.cat(model_reps, dim=0)
         return model_reps, rnd_states
 
-    def build_cache(self, q_reps: Tensor, p_reps: Tensor, **loss_kwargs) -> Tuple[List[Tensor], Tensor]:
+    def build_cache(self, q_reps: Tensor, p_reps: Tensor, n_reps: Union[Tensor, None], **loss_kwargs) -> Tuple[List[Tensor], Tensor]:
         """
         Compute the gradient cache
         :param reps: Computed representations from all encoder models
@@ -217,11 +227,12 @@ class BiEncoderWithGradCache:
         """
         q_reps = q_reps.detach().requires_grad_()
         p_reps = p_reps.detach().requires_grad_()
-        
+        if n_reps is not None:
+            n_reps = n_reps.detach().requires_grad_()
         
         with autocast() if self.fp16 else nullcontext():
             # 从这里出发，向前推导参数格式
-            loss = self.loss_fn(q_reps, p_reps, **loss_kwargs)
+            loss = self.loss_fn(q_reps, p_reps, n_reps, **loss_kwargs)
 
         if self.fp16:
             self.scaler.scale(loss).backward()
@@ -230,7 +241,8 @@ class BiEncoderWithGradCache:
 
         q_cache = q_reps.grad
         p_cache = p_reps.grad
-        return q_cache, p_cache, loss.detach()
+        n_cache = n_reps.grad if n_reps is not None else None
+        return q_cache, p_cache, n_cache, loss.detach()
 
     def forward_backward(
             self,

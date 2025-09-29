@@ -101,7 +101,7 @@ class RetroMAEForPretraining(nn.Module):
         elif isinstance(bert, ErnieForMaskedLM):
             self.embeddings = self.lm.ernie.embeddings
             self.decoder_embeddings = self.lm.ernie.embeddings
-            
+
         self.c_head = BertLayerForDecoder(bert.config)
         self.c_head.apply(self.lm._init_weights)
 

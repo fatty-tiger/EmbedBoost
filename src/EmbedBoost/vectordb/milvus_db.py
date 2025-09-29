@@ -5,7 +5,6 @@ from typing import List, Dict, Any, Union
 from EmbedBoost.abc.embedder import BaseEmbedder
 from EmbedBoost.abc.vectordb_base import BaseVectorStore
 from EmbedBoost.common.file_util import batch_generator
-from EmbedBoost.common import rrf_util
 
 from pymilvus import MilvusClient
 from pymilvus import (
@@ -92,12 +91,11 @@ class MilvusVectorStore(BaseVectorStore):
             for i, doc in enumerate(batch_docs):
                 entity = {
                     "pk": doc['pk'],
-                    "text": doc['text'],
-                    #"dense_vector": dense_vectors[i],
+                    "text": doc['text']
                 }
                 if self.use_dense:
                     entity['dense_vector'] = dense_vectors[i]
-                if embedder.use_sparse:
+                if self.use_sparse:
                     entity['sparse_vector'] = encoded['sparse_weights'][i]
                 batched_entities.append(entity)
 

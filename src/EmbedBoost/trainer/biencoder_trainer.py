@@ -13,7 +13,7 @@ from datetime import datetime
 
 from EmbedBoost.model.bgem3 import BGEM3Embedder
 from EmbedBoost.model.biencoder import BiEncoder, BiEncoderWithGradCache
-from EmbedBoost.loss.biencoder_loss import InbatchNegInfoNCELoss, CommonInfoNCELoss
+from EmbedBoost.loss.biencoder_loss import InfoNCELoss
 from EmbedBoost.dataset.biencoder_dataset import BiEncoderDataset
 
 
@@ -53,18 +53,21 @@ def report_epoch_loss(epoch, step, avg_loss_dict):
         message += f", sparse_self_distill_loss: {avg_loss_dict['sparse_self_distill_loss']:.4f}"
     logger.info(message)
 
-
-def build_loss_func(args):
-    if args.negative_mode == 'inbatch_negative':
-        return InbatchNegInfoNCELoss()
-    elif args.negative_mode == 'explicit_negative':
-        return CommonInfoNCELoss()
-    raise ValueError(f"unknown negative_mode: {args.negative_mode}")
+def get_dense_reps(model_output):
+    return model_output['dense_vectors']
 
 
-def get_rep_fn(model_output):
-    #return model_output['dense_vectors']
+def get_sparse_reps(model_output):
     return model_output['sparse_vectors']
+
+
+def make_reps_fn(args):
+    if args.use_dense:
+        return get_dense_reps
+    elif args.use_sparse:
+        return get_sparse_reps
+    else:
+        raise ValueError("at least one of use_dense and use_sparse must be True")
 
 
 def train(args):
@@ -91,10 +94,10 @@ def train(args):
         optimizer.load_state_dict(training_state_checkpoint['optimizer_state_dict'])
         logger.info("optimizer state loaded.")
     
-    loss_func = build_loss_func(args)
+    loss_func = InfoNCELoss()
 
     train_files = args.train_data_files.split(",")
-    train_dataset = BiEncoderDataset(train_files, tokenizer, args.max_query_length, args.max_doc_length, args.negative_mode)
+    train_dataset = BiEncoderDataset(train_files, tokenizer, args.max_query_length, args.max_doc_length, args.negative_mode, group_size=args.group_size)
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=train_dataset.collate_fn, drop_last=True, shuffle=True)
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -117,47 +120,44 @@ def train(args):
             chunk_size=args.cache_chunk_size,
             loss_fn=loss_func,
             split_input_fn=None,
-            get_rep_fn=get_rep_fn
+            get_rep_fn=make_reps_fn(args)
         )
     else:
         biencoder = BiEncoder(
             q_encoder=model,
             p_encoder=model,
             loss_fn=loss_func,
-            get_rep_fn=get_rep_fn
+            get_rep_fn=make_reps_fn(args)
         )
     
     last_epoch = training_state_checkpoint['epoch'] if args.resume_from_checkpoint else 0
     step = training_state_checkpoint['step'] if args.resume_from_checkpoint else 0
 
     model_kwargs = {}
-    loss_kwargs = {}
+    
+    loss_kwargs = {
+        'temperature': args.temperature
+    }
 
     for epoch in range(last_epoch+1, args.train_epochs+1):
         # loss_list = []
         # epoch_loss_dict = collections.defaultdict(float)
         # epoch_start_step = step
-        for _, (q_inputs, p_inputs) in enumerate(tqdm(train_dataloader, disable=args.disable_tqdm)):
+        for batch_idx, (q_inputs, p_inputs, n_inputs) in enumerate(tqdm(train_dataloader, disable=args.disable_tqdm)):
             q_inputs = {key: val.to(device) for key, val in q_inputs.items()}
             p_inputs = {key: val.to(device) for key, val in p_inputs.items()}
-
+            if n_inputs:
+                n_inputs = {key: val.to(device) for key, val in n_inputs.items()}
+            # if batch_idx == 0:
+            #     logger.info(f"q_inputs: {q_inputs['input_ids'].shape}")
+            #     logger.info(f"p_inputs: {p_inputs['input_ids'].shape}")
+            #     logger.info(f"n_inputs: {n_inputs['input_ids'].shape}")
             optimizer.zero_grad()
-            loss = biencoder(q_inputs, p_inputs, model_kwargs, loss_kwargs)
-            # step_loss_dict = {k: v.item() for k, v in loss_dict.items()}
-            # for k, v in loss_dict.items():
-            #     val = v.item()
-            #     step_loss_dict[k] = val
-            #     epoch_loss_dict[k] += val
-
+            loss = biencoder(q_inputs, p_inputs, n_inputs, model_kwargs, loss_kwargs)
             if step % args.log_steps == 0:
                 logger.info(f"Losses in epoch-{epoch}, step-{step}, total_loss: {loss.item():.4f}")
-                # report_loss(epoch, step, step_loss_dict)
-            
             optimizer.step()
             step += 1
-        
-        # epcoch_avgloss_dict = {k: v / (step - epoch_start_step) for k, v in epoch_loss_dict.items()}
-        # report_epoch_loss(epoch, step, epcoch_avgloss_dict)
         
         if epoch % args.save_epochs == 0:
             # TODO: 保存目录上体现epoch和step
@@ -277,6 +277,12 @@ def main():
         type=int,
         default=1024,
         help="每批次样本数 (默认: 1024)"
+    )
+    parser.add_argument(
+        "--group_size",
+        type=int,
+        default=0,
+        help="显示负样本模式下的组大小 (默认: 0)"
     )
     parser.add_argument(
         "--learning_rate",
