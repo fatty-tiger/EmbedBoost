@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Union
 from EmbedBoost.abc.embedder import BaseEmbedder
 from EmbedBoost.abc.vectordb_base import BaseVectorStore
 from EmbedBoost.common.file_util import batch_generator
+from EmbedBoost.common.tensor_util import normalize_vectors
 
 from pymilvus import MilvusClient
 from pymilvus import (
@@ -87,7 +88,8 @@ class MilvusVectorStore(BaseVectorStore):
             texts = [x['text'] for x in batch_docs]
             encoded = embedder.encode(texts, max_length=max_length)
             if self.use_dense:
-                dense_vectors = encoded['dense_vectors'].tolist()
+                dense_vectors = normalize_vectors(encoded['dense_vectors'][:, :self.dense_dim])
+                dense_vectors = dense_vectors.tolist()
             for i, doc in enumerate(batch_docs):
                 entity = {
                     "pk": doc['pk'],

@@ -69,7 +69,6 @@ def make_reps_fn(args):
     else:
         raise ValueError("at least one of use_dense and use_sparse must be True")
 
-
 def train(args):
     device = torch.device(args.device)
     model = BGEM3Embedder(
@@ -135,10 +134,14 @@ def train(args):
 
     model_kwargs = {}
     
+    mrl_dims = [int(x) for x in args.mrl_dims.split(",")]
     loss_kwargs = {
-        'temperature': args.temperature
+        'temperature': args.temperature,
+        'use_mrl': args.use_mrl,
+        'mrl_dims': mrl_dims,
+        'use_mrl_distill': args.use_mrl_distill,
+        'mrl_distill_weight': args.mrl_distill_weight
     }
-
     for epoch in range(last_epoch+1, args.train_epochs+1):
         # loss_list = []
         # epoch_loss_dict = collections.defaultdict(float)
@@ -223,6 +226,28 @@ def main():
         type=int,
         default=128,
         help="稠密向量维度 (默认: 128)"
+    )
+    parser.add_argument(
+        "--use_mrl",
+        action="store_true",
+        help="使用MRL (默认: false)"
+    )
+    parser.add_argument(
+        "--mrl_dims",
+        type=str,
+        default="AUTO",
+        help="mrl_dims"
+    )
+    parser.add_argument(
+        "--use_mrl_distill",
+        action="store_true",
+        help="MRL自蒸馏 (默认: false)"
+    )
+    parser.add_argument(
+        "--mrl_distill_weight",
+        type=float,
+        default=0.2,
+        help="mrl_distill_weight (默认: 0.2)"
     )
     parser.add_argument(
         "--use_sparse",

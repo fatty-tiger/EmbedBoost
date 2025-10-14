@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Optional
 from transformers import AutoConfig
 from transformers import AutoModel
 from transformers import AutoTokenizer
@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 
 class BGEM3Embedder(BaseEmbedder, nn.Module):
-    def __init__(self, model_name_or_path: str, use_dense: bool = True, dense_pooling: str = 'cls', dense_dim: int = 512, use_sparse: bool = True):
+    def __init__(self, model_name_or_path: str, use_dense: bool = True, dense_pooling: str = 'cls', dense_dim: int = 512,
+                 infer_dense_dim: int = 512, use_sparse: bool = True, use_mrl: bool = False, mrl_dims: Optional[List[int]] = None):
         super(BGEM3Embedder, self).__init__()
 
         config = AutoConfig.from_pretrained(model_name_or_path)
@@ -36,9 +37,19 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
         self.dense_pooling = dense_pooling
         self.use_dense = use_dense
         self.dense_dim = dense_dim
+        self.infer_dense_dim = infer_dense_dim
         self.use_sparse = use_sparse
-        self.normalize_embeddings = True
-
+        self.use_mrl = use_mrl
+        self.mrl_dims = mrl_dims
+        if mrl_dims is not None:
+            if mrl_dims == 'AUTO':
+                mrl_dims = [dense_dim]
+            assert isinstance(mrl_dims, list)
+            assert len(mrl_dims) > 0
+            if dense_dim != mrl_dims[-1]:
+                logger.warn(f"dense dim {dense_dim} does not match mrl dim {mrl_dims[-1]}, resetting dense dim to mrl dim.")
+                self.dense_dim = mrl_dims[-1]
+        logger.warn(f"use_mrl: {use_mrl}, mrl_dims: {mrl_dims}, infer_dense_dim: {infer_dense_dim}")
         assert use_dense or use_sparse
 
         if use_dense:
@@ -78,7 +89,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
             NotImplementedError: Specified pooling method not implemented.
 
         Returns:
-            torch.Tensor: The dense embeddings.
+            List[torch.Tensor]: The dense embeddings.
         """
         if self.dense_pooling == "cls":
             logits = last_hidden_state[:, 0]
@@ -101,10 +112,19 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                 ]
         else:
             raise NotImplementedError(f"pooling method {self.dense_pooling} not implemented")
+        
         logits = self.dense_linear(logits)
-        if self.normalize_embeddings:
-            logits = F.normalize(logits, dim=-1)
         return logits
+    
+        # dense_vector_list = []
+        # if self.use_mrl:
+        #     for dim in self.mrl_dims:
+        #         dense_vector_list.append(F.normalize(logits[:, :dim]))
+        # else:
+        #     logits = F.normalize(logits, dim=-1)
+        #     dense_vector_list.append(logits)
+        
+        # return dense_vector_list
 
     def _sparse_weights(self, last_hidden_state, input_ids):
         """Compute and return the sparse embedding.
@@ -230,8 +250,6 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                 ).to(device)
 
                 res = self.forward(
-                    # input_ids=encoded['input_ids'],
-                    # attention_mask=encoded['attention_mask'],
                     encoded,
                     return_sparse_weights=True
                 )
@@ -276,7 +294,3 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
             torch.save(_trans_state_dict(self.sparse_linear.state_dict()),
                        os.path.join(output_dir, 'sparse_linear.pt'))
             logger.info(f"sparse linear saved to {os.path.join(output_dir, 'sparse_linear.pt')}")
-    
-
-# def get_representation(model_output):
-#     return model_output['dense_vectors']
