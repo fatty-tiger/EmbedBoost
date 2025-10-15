@@ -1,0 +1,20 @@
+/data/miniconda3/envs/deepnlp/bin/python EmbedBoost/trainer/biencoder_trainer.py \
+    --train_data_files /data/jiangjie/FattyEmbedding/data/multicpr/ecom/train_inbatch_neg.jsonl \
+    --output_dir /data/jiangjie/FattyEmbedding/output/multicpr/ecom/v1/models/m1-2 \
+    --model_name_or_path /data/jiangjie/FattyEmbedding/output/multicpr/ecom/v1/models/ernie-3.0-medium-zh-retromae/checkpoint-62680 \
+    --max_query_length 64 \
+    --max_doc_length 128 \
+    --use_dense \
+    --dense_pooling cls \
+    --dense_dim 96 \
+    --learning_rate 8e-5 \
+    --train_epochs 20 \
+    --negative_mode inbatch_negative \
+    --batch_size 10240 \
+    --temperature 0.1 \
+    --gradient_checkpointing \
+    --gradient_cache \
+    --cache_chunk_size 2048 \
+    --log_steps 1 \
+    --save_epochs 5 \
+    --device cuda:5

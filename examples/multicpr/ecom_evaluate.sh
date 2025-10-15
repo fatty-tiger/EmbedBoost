@@ -1,0 +1,17 @@
+/data/miniconda3/envs/deepnlp/bin/python EmbedBoost/evaluate/run.py \
+    --model_name_or_path /data/jiangjie/FattyEmbedding/output/multicpr/ecom/v1/models/m1-2/ckp_epoch_20_step_180 \
+    --device cuda:5 \
+    --max_query_length 64 \
+    --max_doc_length 128 \
+    --use_dense \
+    --dense_pooling cls \
+    --dense_dim 96 \
+    --infer_dense_dim 96 \
+    --do_eval \
+    --topk_list "1,10,20,50,100,200,300" \
+    --dataset_name multicpr-ecom-dev \
+    --milvus_db_uri /data/jiangjie/FattyEmbedding/.db/multicpr_ecom.db \
+    --collection_name "bgem3_index" \
+    --do_insert \
+    --insert_batch_size 2000 \
+    --overwrite_collection
