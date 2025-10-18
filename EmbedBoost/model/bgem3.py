@@ -18,6 +18,7 @@ from transformers import AutoTokenizer
 
 from EmbedBoost.abc.embedder import BaseEmbedder
 from EmbedBoost.common.file_util import batch_generator
+from EmbedBoost.common.tensor_util import normalize_vectors
 
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 class BGEM3Embedder(BaseEmbedder, nn.Module):
     def __init__(self, model_name_or_path: str, use_dense: bool = True, dense_pooling: str = 'cls', dense_dim: int = 512,
-                 infer_dense_dim: int = 512, use_sparse: bool = True, use_mrl: bool = False, mrl_dims: Optional[List[int]] = None):
+                 infer_dense_dim: int = -1, use_sparse: bool = True, use_mrl: bool = False, mrl_dims: Optional[List[int]] = None):
         super(BGEM3Embedder, self).__init__()
 
         config = AutoConfig.from_pretrained(model_name_or_path)
@@ -37,7 +38,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
         self.dense_pooling = dense_pooling
         self.use_dense = use_dense
         self.dense_dim = dense_dim
-        self.infer_dense_dim = infer_dense_dim
+        self.infer_dense_dim = infer_dense_dim if infer_dense_dim > 0 else dense_dim
         self.use_sparse = use_sparse
         self.use_mrl = use_mrl
         self.mrl_dims = mrl_dims
@@ -60,6 +61,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
             dense_state_fpath = os.path.join(model_name_or_path, 'dense_linear.pt')
             if os.path.exists(dense_state_fpath):    
                 dense_state_dict = torch.load(dense_state_fpath, map_location='cpu', weights_only=True)
+                dense_state_dict = {k.replace('dense.', ''): v for k, v in dense_state_dict.items()} # adhoc
                 self.dense_linear.load_state_dict(dense_state_dict)
                 logger.info("dense linear checkpoint loaded.")
             else:
@@ -114,17 +116,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
             raise NotImplementedError(f"pooling method {self.dense_pooling} not implemented")
         
         logits = self.dense_linear(logits)
-        return logits
-    
-        # dense_vector_list = []
-        # if self.use_mrl:
-        #     for dim in self.mrl_dims:
-        #         dense_vector_list.append(F.normalize(logits[:, :dim]))
-        # else:
-        #     logits = F.normalize(logits, dim=-1)
-        #     dense_vector_list.append(logits)
-        
-        # return dense_vector_list
+        return logits        
 
     def _sparse_weights(self, last_hidden_state, input_ids):
         """Compute and return the sparse embedding.
@@ -215,7 +207,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
         
         return res
     
-    def encode(self, texts: List[str], max_length: int = 512, batch_size: int = 4000) -> Dict[str, Union[np.ndarray, None]]:
+    def encode(self, texts: List[str], max_length: int = 512, batch_size: int = 4000, do_normalize=True) -> Dict[str, Union[np.ndarray, None]]:
         """
         Encode a list of text strings into embeddings.
         
@@ -239,7 +231,6 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
         dense_vecs_list = []
         sparse_weights_list = []
         for _, batch_texts in batch_generator(texts, batch_size):
-            # Get embeddings
             with torch.no_grad():
                 encoded = self.tokenizer(
                     batch_texts,
@@ -264,7 +255,14 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                 dense_vectors = dense_vecs_list[0]
             elif len(dense_vecs_list) > 1:
                 dense_vectors = torch.cat(dense_vecs_list, dim=0)
-            ret_dict['dense_vectors'] = dense_vectors.cpu().numpy()
+            dense_vectors = dense_vectors.cpu().numpy()
+
+            if self.infer_dense_dim != self.dense_dim:
+                dense_vectors = dense_vectors[:, :self.infer_dense_dim]
+            if do_normalize:
+                dense_vectors = normalize_vectors(dense_vectors)
+
+            ret_dict['dense_vectors'] = dense_vectors
 
         if sparse_weights_list:
             ret_dict['sparse_weights'] = sparse_weights_list

@@ -2,8 +2,8 @@ import logging
 
 import torch
 import torch.nn.functional as F
-from EmbedBoost.retromae.pretrain.arguments import ModelArguments
-from EmbedBoost.retromae.pretrain.enhancedDecoder import BertLayerForDecoder
+from EmbedBoost.retromae.arguments import ModelArguments
+from EmbedBoost.retromae.enhancedDecoder import BertLayerForDecoder
 from torch import nn
 from transformers import BertForMaskedLM, AutoModelForMaskedLM
 from transformers.modeling_outputs import MaskedLMOutput

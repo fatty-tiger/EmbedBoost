@@ -5,8 +5,8 @@ from typing import Union
 from torch import nn
 from transformers import BertForMaskedLM, ErnieForMaskedLM, AutoModelForMaskedLM
 from transformers.modeling_outputs import MaskedLMOutput
-from EmbedBoost.retromae.pretrain.arguments import ModelArguments
-from EmbedBoost.retromae.pretrain.enhancedDecoder import BertLayerForDecoder
+from EmbedBoost.retromae.arguments import ModelArguments
+from EmbedBoost.retromae.enhancedDecoder import BertLayerForDecoder
 
 
 

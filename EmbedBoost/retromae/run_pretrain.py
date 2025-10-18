@@ -4,11 +4,11 @@ import sys
 
 import transformers
 
-from EmbedBoost.retromae.pretrain.arguments import DataTrainingArguments, ModelArguments
-from EmbedBoost.retromae.pretrain.data import DatasetForPretraining, RetroMAECollator, DupMAECollator
-from EmbedBoost.retromae.pretrain.modeling import RetroMAEForPretraining
-from EmbedBoost.retromae.pretrain.modeling_duplex import DupMAEForPretraining
-from EmbedBoost.retromae.pretrain.trainer import RetroMAEPreTrainer
+from EmbedBoost.retromae.arguments import DataTrainingArguments, ModelArguments
+from EmbedBoost.retromae.data import DatasetForPretraining, RetroMAECollator, DupMAECollator
+from EmbedBoost.retromae.modeling import RetroMAEForPretraining
+from EmbedBoost.retromae.modeling_duplex import DupMAEForPretraining
+from EmbedBoost.retromae.trainer import RetroMAEPreTrainer
 
 from transformers import (
     AutoTokenizer,

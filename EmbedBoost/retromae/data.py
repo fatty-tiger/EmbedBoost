@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch.utils.data.dataset
 from datasets import Dataset
-from EmbedBoost.retromae.pretrain.utils import tensorize_batch
+from EmbedBoost.retromae.utils import tensorize_batch
 from transformers import DataCollatorForWholeWordMask
 
 

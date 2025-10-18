@@ -7,54 +7,6 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 
-# class InfoNCELoss(nn.Module):
-#     def __init__(self):
-#         super(InfoNCELoss, self).__init__()
-
-#     def forward(self, q_vector_list, p_vector_list, n_vectors=None, temperature=0.05):
-#         assert isinstance(q_vector_list, list)
-#         assert isinstance(p_vector_list, list)
-#         assert len(q_vector_list) == len(p_vector_list)
-
-#         bsz = q_vector_list[-1].shape[0]
-#         embed_dim = q_vector_list[-1].shape[1]
-#         device = q_vector_list[-1].device
-
-#         # inbatch negative
-#         if n_vectors is None:
-#             targets = torch.arange(bsz).to(device)
-            
-#             loss_list = []
-#             for q_vectors, p_vectors in zip(q_vector_list, p_vector_list):
-#                 sub_scores = torch.mm(q_vectors, p_vectors.transpose(1, 0)) / temperature
-#                 sub_loss = F.cross_entropy(sub_scores, targets, reduction='mean')
-#                 loss_list.append(sub_loss)
-#             if len(loss_list) > 1:
-#                 return sum(loss_list) / len(loss_list)
-#             else:
-#                 return loss_list[0]
-
-#         # excitive negative
-#         else:
-#             n_vectors = n_vectors.reshape(bsz, -1, embed_dim)
-#             num_negatives = n_vectors.size(1)
-
-#             # 扩展查询向量以匹配负样本的维度 [batch_size, num_negatives, embedding_dim]
-#             q_vectors_expanded = q_vectors.unsqueeze(1).expand(-1, num_negatives, -1)
-            
-#             q_pos_scores = (torch.sum(q_vectors * p_vectors, dim=1) / temperature).unsqueeze(1)
-#             q_neg_scores = torch.sum(q_vectors_expanded * n_vectors, dim=2)  / temperature
-
-#             # 合并正负样本相似度
-#             # [batch_size, 1 + num_negatives]
-#             scores = torch.cat([q_pos_scores, q_neg_scores], dim=1)
-#             # 标签：正样本始终在位置0
-#             targets = torch.zeros(bsz, dtype=torch.long, device=device)
-#             # logger.info(f"scores: {scores.shape}, targets: {targets.shape}")
-#             loss = F.cross_entropy(scores, targets, reduction='mean')
-#             return loss
-
-
 class InfoNCELoss(nn.Module):
     def __init__(self):
         super(InfoNCELoss, self).__init__()
@@ -73,6 +25,7 @@ class InfoNCELoss(nn.Module):
                 loss = None                
                 
                 # 优先操作大的dim，便于蒸馏小的dim
+                mrl_dims = [int(x) for x in mrl_dims.split(",")]
                 for i, dim in enumerate(mrl_dims[::-1]):
                     sub_q_vectors = F.normalize(q_vectors[:, :dim])
                     sub_p_vectors = F.normalize(p_vectors[:, :dim])

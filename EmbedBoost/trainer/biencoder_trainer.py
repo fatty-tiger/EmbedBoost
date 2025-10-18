@@ -3,7 +3,6 @@ import sys
 import logging
 import argparse
 import json
-import collections
 
 import torch
 
@@ -69,14 +68,15 @@ def make_reps_fn(args):
     else:
         raise ValueError("at least one of use_dense and use_sparse must be True")
 
+
 def train(args):
     device = torch.device(args.device)
     model = BGEM3Embedder(
         args.model_name_or_path, 
-        args.use_dense,
-        args.dense_pooling,
-        args.dense_dim,
-        args.use_sparse
+        use_dense=args.use_dense,
+        dense_pooling=args.dense_pooling,
+        dense_dim=args.dense_dim,
+        use_sparse=args.use_sparse
     )
     model.to(device)
     tokenizer = model.tokenizer
@@ -134,35 +134,33 @@ def train(args):
 
     model_kwargs = {}
     
-    mrl_dims = [int(x) for x in args.mrl_dims.split(",")]
     loss_kwargs = {
         'temperature': args.temperature,
         'use_mrl': args.use_mrl,
-        'mrl_dims': mrl_dims,
+        'mrl_dims': args.mrl_dims,
         'use_mrl_distill': args.use_mrl_distill,
         'mrl_distill_weight': args.mrl_distill_weight
     }
     for epoch in range(last_epoch+1, args.train_epochs+1):
-        # loss_list = []
-        # epoch_loss_dict = collections.defaultdict(float)
-        # epoch_start_step = step
         for batch_idx, (q_inputs, p_inputs, n_inputs) in enumerate(tqdm(train_dataloader, disable=args.disable_tqdm)):
             q_inputs = {key: val.to(device) for key, val in q_inputs.items()}
             p_inputs = {key: val.to(device) for key, val in p_inputs.items()}
             if n_inputs:
                 n_inputs = {key: val.to(device) for key, val in n_inputs.items()}
-            # if batch_idx == 0:
-            #     logger.info(f"q_inputs: {q_inputs['input_ids'].shape}")
-            #     logger.info(f"p_inputs: {p_inputs['input_ids'].shape}")
-            #     logger.info(f"n_inputs: {n_inputs['input_ids'].shape}")
             optimizer.zero_grad()
             loss = biencoder(q_inputs, p_inputs, n_inputs, model_kwargs, loss_kwargs)
-            if step % args.log_steps == 0:
-                logger.info(f"Losses in epoch-{epoch}, step-{step}, total_loss: {loss.item():.4f}")
             optimizer.step()
             step += 1
+            if step % args.log_steps == 0:
+                logger.info(f"Losses in epoch-{epoch}, step-{step}, total_loss: {loss.item():.4f}")
+            
+            if args.save_steps > 0 and step % args.save_steps == 0:
+                save_dir = os.path.join(args.output_dir, f'ckp_epoch_{epoch}_step_{step}')
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir)
+                model.save(save_dir)
         
-        if epoch % args.save_epochs == 0:
+        if args.save_epochs > 0 and epoch % args.save_epochs == 0:
             # TODO: 保存目录上体现epoch和step
             save_dir = os.path.join(args.output_dir, f'ckp_epoch_{epoch}_step_{step}')
             if not os.path.exists(save_dir):
@@ -171,14 +169,15 @@ def train(args):
             # save model ckp
             model.save(save_dir)
             # save optimizer ckp
-            training_state = {
-                'epoch': epoch,
-                'step': step,
-                'optimizer_state_dict': optimizer.state_dict()
-            }
-            ckp_fpath =  os.path.join(save_dir, "training-state-ckp.pt")
-            logger.info(f"training_state saved to: {ckp_fpath}")
-            torch.save(training_state, ckp_fpath)
+            if epoch == args.train_epochs:
+                training_state = {
+                    'epoch': epoch,
+                    'step': step,
+                    'optimizer_state_dict': optimizer.state_dict()
+                }
+                ckp_fpath =  os.path.join(save_dir, "training-state-ckp.pt")
+                logger.info(f"training_state saved to: {ckp_fpath}")
+                torch.save(training_state, ckp_fpath)
 
 
 def main():
@@ -338,6 +337,12 @@ def main():
         type=int,
         default=5,
         help="每多少个epoch保存一次模型 (默认: 5)"
+    )
+    parser.add_argument(
+        "--save_steps",
+        type=int,
+        default=10000,
+        help="每多少个step保存一次模型 (默认: 10000)"
     )
     parser.add_argument(
         "--device",

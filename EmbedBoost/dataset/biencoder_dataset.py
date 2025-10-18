@@ -54,7 +54,10 @@ class BiEncoderDataset(Dataset):
             for x in batch:
                 querys.append(x['query'])
                 positives.append(x['positive'])
-                negatives.extend(x['negatives'][:self.group_size-1])
+                #negatives.extend(x['negatives'][:self.group_size-1])
+                negatives.extend(x['negatives'][10:10+self.group_size-1])
+                # negatives.extend(x['negatives'][20:20+self.group_size-1])
+                
             
             feed_dict_q = self.tokenizer(querys, max_length=self.max_query_length, add_special_tokens=True,
                                         padding='max_length', return_tensors='pt', truncation=True,

@@ -1,3 +1,6 @@
+"""
+Basically copied from https://github.com/FlagOpen/FlagEmbedding
+"""
 from abc import ABC, abstractmethod
 from typing import List, Dict, Union
 import numpy as np
