@@ -52,7 +52,7 @@ class EmbeddingTransporter(object):
         self.dest_tokenizer = AutoTokenizer.from_pretrained(self.dest_model_id_or_path)
         self.dest_vocab = self._load_vocab_dict(os.path.join(self.dest_model_id_or_path, 'vocab.txt'))
         self.dest_embedding = nn.Embedding(self.dest_tokenizer.vocab_size, self.src_config.hidden_size, padding_idx=self.src_config.pad_token_id)
-
+        
         self.do_lower_case = args.do_lower_case
 
     def _load_vocab_dict(self, vocab_fpath):
@@ -81,33 +81,49 @@ class EmbeddingTransporter(object):
         oov_words = {}
         for k, v in dest_vocab.items():
             # special tokens
-            if k == dest_tokenizer.unk_token:
+            if k == src_tokenizer.unk_token:
+                token_mapping[k] = [src_tokenizer.unk_token]
                 word_mapping[v] = [src_vocab[src_tokenizer.unk_token]]
                 continue
-            if k == dest_tokenizer.bos_token:
+            if k == src_tokenizer.cls_token:
+                token_mapping[k] = [src_tokenizer.cls_token]
                 word_mapping[v] = [src_vocab[src_tokenizer.cls_token]]
                 continue
-            if k == dest_tokenizer.eos_token:
+            if k == src_tokenizer.sep_token:
+                token_mapping[k] = [src_tokenizer.sep_token]
                 word_mapping[v] = [src_vocab[src_tokenizer.sep_token]]
                 continue
-            if k == dest_tokenizer.pad_token:
+            # if k == dest_tokenizer.bos_token:
+            #     word_mapping[v] = [src_vocab[src_tokenizer.cls_token]]
+            #     continue
+            # if k == dest_tokenizer.eos_token:
+            #     word_mapping[v] = [src_vocab[src_tokenizer.sep_token]]
+            #     continue
+            if k == src_tokenizer.pad_token:
+                token_mapping[k] = [src_tokenizer.pad_token]
                 word_mapping[v] = [src_vocab[src_tokenizer.pad_token]]
                 continue
-            
+            if k == src_tokenizer.mask_token:
+                token_mapping[k] = [src_tokenizer.mask_token]
+                word_mapping[v] = [src_vocab[src_tokenizer.mask_token]]
+                continue
+
             # normalize
             if self.do_lower_case:
                 k = k.lower()
             
             # 可以在原词表中直接找到的词(对前缀进行处理)
             if k in src_vocab:
-                word_mapping[v] = [src_vocab[k]]
                 token_mapping[k] = [k]
+                word_mapping[v] = [src_vocab[k]]
                 continue
-            if k.startswith('▁') and k.lstrip('▁') in src_vocab:
+            
+            # 尝试去除或者添加前缀
+            if k.startswith('▁') and k != '▁' and k.lstrip('▁') in src_vocab:
                 token_mapping[k] = [k.lstrip('▁')]
                 word_mapping[v] = [src_vocab[k.lstrip('▁')]]
                 continue
-            if k.startswith('##') and k.lstrip('##') in src_vocab:
+            if k.startswith('##') and k != '##' and k.lstrip('##') in src_vocab:
                 token_mapping[k] = [k.lstrip('##')]
                 word_mapping[v] = [src_vocab[k.lstrip('##')]]
                 continue
@@ -120,8 +136,12 @@ class EmbeddingTransporter(object):
                 word_mapping[v] = [src_vocab[f'##{k}']]
                 continue
             
+            k2 = k.lstrip('##').lstrip('▁')
+            if not k2:
+                continue
+                
             # 按src_tokenizer切分后取平均池化（切分前，前缀均去除）
-            tokens = src_tokenizer.tokenize(k.lstrip('##').lstrip('▁'))
+            tokens = src_tokenizer.tokenize(k2)
             if src_tokenizer.unk_token not in tokens:
                 ids = src_tokenizer.convert_tokens_to_ids(tokens)
                 token_mapping[k] = tokens
@@ -130,14 +150,14 @@ class EmbeddingTransporter(object):
             
             # 按char_level切分后取平均池化
             tokens = []
-            for tk in list(k.lstrip('##').lstrip('▁')):
+            for tk in list(k2):
                 if tk in src_vocab:
                     tokens.append(tk)
                     continue
-                if tk.startswith('▁') and tk.lstrip('▁') in src_vocab:
+                if tk.startswith('▁') and tk != '▁' and tk.lstrip('▁') in src_vocab:
                     tokens.append(tk.lstrip('▁'))
                     continue
-                if tk.startswith('##') and tk.lstrip('##') in src_vocab:
+                if tk.startswith('##') and tk != '##' and tk.lstrip('##') in src_vocab:
                     tokens.append(tk.lstrip('##'))
                     continue
                 if not tk.startswith('▁') and f'▁{tk}' in src_vocab:
@@ -150,7 +170,7 @@ class EmbeddingTransporter(object):
             if src_tokenizer.unk_token not in tokens:
                 ids = src_tokenizer.convert_tokens_to_ids(tokens)
                 token_mapping[k] = tokens
-                word_mapping[v] = ids[:]
+                word_mapping[v] = ids
                 continue
 
             oov_words[k] = v
@@ -256,11 +276,6 @@ def train_new_tokenizer(args):
 
 def main():
     parser = argparse.ArgumentParser(description="主程序")
-    # parser.add_argument('--output_dir', type=str, help='输出目录')
-    # parser.add_argument('--train_corpus_fpath', type=str, help='训练数据集路径')
-    # parser.add_argument('--src_model_id_or_path', type=str, required=True, help='源模型')
-    # parser.add_argument('--do_lower_case', default=False, action='store_true', help='是否转小写')
-    # parser.add_argument('--vocab_size', type=int, default=20000, help='词表大小')
 
     subparsers = parser.add_subparsers(dest='trainer', required=True)
 

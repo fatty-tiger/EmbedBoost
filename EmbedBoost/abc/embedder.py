@@ -13,7 +13,7 @@ class BaseEmbedder(ABC):
     """
     
     @abstractmethod
-    def encode(self, texts: List[str], max_length: int) -> Dict[str, Union[np.ndarray, None]]:
+    def encode(self, texts: List[str], max_length: int, batch_size: int) -> Dict[str, Union[np.ndarray, None]]:
         """
         Encode texts into embeddings.
         

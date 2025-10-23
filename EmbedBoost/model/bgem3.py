@@ -3,18 +3,19 @@ BGE-M3 Embedder.
 Basically copied from https://github.com/FlagOpen/FlagEmbedding
 Colbert part removed
 """
-
 import os
 import logging
+import onnxruntime
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import math
 import numpy as np
 
 from typing import List, Dict, Union, Optional
 from transformers import AutoConfig
 from transformers import AutoModel
 from transformers import AutoTokenizer
+from tqdm import tqdm
 
 from EmbedBoost.abc.embedder import BaseEmbedder
 from EmbedBoost.common.file_util import batch_generator
@@ -51,6 +52,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                 logger.warn(f"dense dim {dense_dim} does not match mrl dim {mrl_dims[-1]}, resetting dense dim to mrl dim.")
                 self.dense_dim = mrl_dims[-1]
         logger.warn(f"use_mrl: {use_mrl}, mrl_dims: {mrl_dims}, infer_dense_dim: {infer_dense_dim}")
+        
         assert use_dense or use_sparse
 
         if use_dense:
@@ -292,3 +294,31 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
             torch.save(_trans_state_dict(self.sparse_linear.state_dict()),
                        os.path.join(output_dir, 'sparse_linear.pt'))
             logger.info(f"sparse linear saved to {os.path.join(output_dir, 'sparse_linear.pt')}")
+
+
+class OnnxInferer(object):
+    def __init__(self, model_id_or_path, device='cpu'):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id_or_path)
+        self.device = torch.device(device)
+        onnx_fpath = os.path.join(model_id_or_path, "model.onnx")
+        ort_sessionopts = onnxruntime.SessionOptions()
+        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if 'cuda' in device else ['CPUExecutionProvider']
+        logging.info(f"loading onnx mmodel from {onnx_fpath}")
+        self.ort_session = onnxruntime.InferenceSession(onnx_fpath, 
+                                                        sess_options=ort_sessionopts,
+                                                        providers=providers)
+        logging.info("onnx inference session created")
+
+    def encode(self, query_list, batch_size=128, max_length=128, do_normalize=True):
+        ret_dict = {}
+
+        vector_list = []
+        total = int(math.ceil(len(query_list) / batch_size))
+        for idx, batch_texts in tqdm(batch_generator(query_list, batch_size), total=total):
+            encoded = self.tokenizer(batch_texts, max_length=max_length, padding=True, truncation=True, return_tensors='np')
+            onnx_inputs = {k: v for k, v in encoded.items()}
+            onnx_outputs = self.ort_session.run(None, onnx_inputs)
+            vector_list.append(onnx_outputs[1])
+        ret_dict['dense_vectors'] = np.concatenate(vector_list, axis=0)
+        return ret_dict
+    
