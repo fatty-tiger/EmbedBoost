@@ -73,3 +73,39 @@ class InfoNCELoss(nn.Module):
             loss = F.cross_entropy(scores, targets, reduction='mean')
             return loss
         
+
+
+class MultiInfoNCELoss(nn.Module):
+    def __init__(self):
+        super(MultiInfoNCELoss, self).__init__()
+
+    def forward(self, q_vectors_dict, p_vectors_dict, n_vectors_dict, temperature=0.05, self_distill=False):
+        bsz = 0
+        device = None
+        for k in ['dense_vectors', 'sparse_vectors', 'colbert_vectors']:
+            if k in q_vectors_dict:
+                bsz = q_vectors_dict[k].shape[0]
+                device = q_vectors_dict[k].device
+                break
+
+        targets = torch.arange(bsz).to(device)
+        loss = 0
+        # inbatch negative
+        if n_vectors_dict is None:
+            if 'dense_vectors' in q_vectors_dict and 'dense_vectors' in p_vectors_dict:
+                q_dense_vectors = F.normalize(q_vectors_dict['dense_vectors'], dim=-1)
+                p_dense_vectors = F.normalize(p_vectors_dict['dense_vectors'], dim=-1)
+                scores = torch.mm(q_dense_vectors, p_dense_vectors.transpose(1, 0)) / temperature
+                loss += F.cross_entropy(scores, targets, reduction='mean')
+            
+            if 'sparse_vectors' in q_vectors_dict and 'sparse_vectors' in p_vectors_dict:
+                q_sparse_vectors = q_vectors_dict['sparse_vectors']
+                p_sparse_vectors = p_vectors_dict['sparse_vectors']
+                print(type(q_sparse_vectors), type(p_sparse_vectors))
+                scores = torch.spmm(q_sparse_vectors, p_sparse_vectors.t()).to_dense()
+                loss += F.cross_entropy(scores, targets, reduction='mean')
+
+            # if self.self_distill:
+            #     pass
+            return loss
+            

@@ -27,20 +27,23 @@ logger = logging.getLogger(__name__)
 
 class BGEM3Embedder(BaseEmbedder, nn.Module):
     def __init__(self, model_name_or_path: str, use_dense: bool = True, dense_pooling: str = 'cls', dense_dim: int = 512,
-                 infer_dense_dim: int = -1, use_sparse: bool = True, use_mrl: bool = False, mrl_dims: Optional[List[int]] = None):
+                 infer_dense_dim: int = -1, use_sparse: bool = False, use_colbert: bool = False, colbert_dim: int = -1,
+                 use_mrl: bool = False, mrl_dims: Optional[List[int]] = None):
         super(BGEM3Embedder, self).__init__()
 
         config = AutoConfig.from_pretrained(model_name_or_path)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
         self.vocab_size = config.vocab_size
         
-        self.bert = AutoModel.from_pretrained(model_name_or_path, config=config, add_pooling_layer=False)
+        self.encoder = AutoModel.from_pretrained(model_name_or_path, config=config, add_pooling_layer=False)
         self.hidden_size = config.hidden_size
         self.dense_pooling = dense_pooling
         self.use_dense = use_dense
         self.dense_dim = dense_dim
         self.infer_dense_dim = infer_dense_dim if infer_dense_dim > 0 else dense_dim
         self.use_sparse = use_sparse
+        self.use_colbert = use_colbert
+        self.colbert_dim = colbert_dim
         self.use_mrl = use_mrl
         self.mrl_dims = mrl_dims
         if mrl_dims is not None:
@@ -81,8 +84,28 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                 logger.info("sparse linear weights loaded.")
             else:
                 logger.warn("sparse linear weights were not found, random initialized.")
+            self.sparse_unused_tokens = torch.tensor([
+                self.tokenizer.cls_token_id, 
+                self.tokenizer.mask_token_id,
+                self.tokenizer.pad_token_id,
+                self.tokenizer.unk_token_id,
+                self.tokenizer.sep_token_id,
+            ])
+        
+        if use_colbert:
+            self.colbert_linear = torch.nn.Linear(
+                in_features=config.hidden_size,
+                out_features=config.hidden_size if colbert_dim <= 0 else colbert_dim
+            )
+            colbert_state_fpath = os.path.join(model_name_or_path, 'colbert_linear.pt')
+            if os.path.exists(colbert_state_fpath):    
+                colbert_state_dict = torch.load(colbert_state_fpath, map_location='cpu', weights_only=True)
+                self.colbert_linear.load_state_dict(colbert_state_dict)
+                logger.info("colbert linear weights loaded.")
+            else:
+                logger.warn("colbert linear weights were not found, random initialized.")
 
-    def _dense_embedding(self, last_hidden_state, attention_mask):
+    def dense_embedding(self, last_hidden_state, attention_mask):
         """Use the pooling method to get the dense embedding.
 
         Args:
@@ -156,56 +179,92 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
             token_weights_list.append({id: vals[j] for j, id in enumerate(ids[i].tolist()) if id not in unused_tokens})
         return token_weights_list
     
-    def _sparse_embedding(self, last_hidden_state, input_ids):
-        """Compute and return the sparse embedding.
+    # def sparse_embedding(self, last_hidden_state, input_ids):
+    #     """Compute and return the sparse embedding.
+
+    #     Args:
+    #         hidden_state (torch.Tensor): The model output's last hidden state.
+    #         input_ids (_type_): Ids from input features.
+
+    #     Returns:
+    #         torch.Tensor: The sparse embedding or just the token weights.
+    #     """
+    #     token_weights = torch.relu(self.sparse_linear(last_hidden_state))
+    #     sparse_embedding = torch.zeros(
+    #         input_ids.size(0), input_ids.size(1), self.vocab_size,
+    #         dtype=token_weights.dtype,
+    #         device=token_weights.device
+    #     )
+    #     sparse_embedding = torch.scatter(sparse_embedding, dim=-1, index=input_ids.unsqueeze(-1), src=token_weights)
+
+    #     unused_tokens = [
+    #         self.tokenizer.cls_token_id, 
+    #         self.tokenizer.mask_token_id,
+    #         self.tokenizer.pad_token_id,
+    #         self.tokenizer.unk_token_id,
+    #     ]
+    #     sparse_embedding = torch.max(sparse_embedding, dim=1).values
+    #     sparse_embedding[:, unused_tokens] *= 0.
+    #     return sparse_embedding
+
+    def sparse_embedding(self, last_hidden_state, input_ids):
+        # self.sparse_unused_tokens.to(input_ids.device)
+        token_weights = torch.relu(self.sparse_linear(last_hidden_state))
+        token_weights = token_weights.squeeze(-1)
+        # cond = (
+        #     (input_ids != self.tokenizer.cls_token_id) & \
+        #     (input_ids != self.tokenizer.mask_token_id) & \
+        #     (input_ids != self.tokenizer.pad_token_id) & \
+        #     (input_ids != self.tokenizer.unk_token_id) & \
+        #     (input_ids != self.tokenizer.sep_token_id)
+        # )
+        cond = (input_ids >= 5)
+        mask = cond.nonzero(as_tuple=True)
+        indices = torch.stack([mask[0], input_ids[mask]], dim=0)
+        values = token_weights[mask]
+        # print(indices.shape, values.shape)
+        sparse_maxtrix = torch.sparse_coo_tensor(indices, values, size=(input_ids.shape[0], self.vocab_size))
+        # sparse_maxtrix = sparse_maxtrix.coalesce()
+        return sparse_maxtrix
+
+    def colbert_embedding(self, last_hidden_state, mask):
+        """Get the colbert vectors.
 
         Args:
-            hidden_state (torch.Tensor): The model output's last hidden state.
-            input_ids (_type_): Ids from input features.
-
+            last_hidden_state (torch.Tensor): The model output's last hidden state.
+            attention_mask (torch.Tensor): Mask out padding tokens during pooling.
         Returns:
-            torch.Tensor: The sparse embedding or just the token weights.
+            torch.Tensor: The colbert vectors.
         """
-        token_weights = torch.relu(self.sparse_linear(last_hidden_state))
-        sparse_embedding = torch.zeros(
-            input_ids.size(0), input_ids.size(1), self.vocab_size,
-            dtype=token_weights.dtype,
-            device=token_weights.device
-        )
-        sparse_embedding = torch.scatter(sparse_embedding, dim=-1, index=input_ids.unsqueeze(-1), src=token_weights)
-
-        unused_tokens = [
-            self.tokenizer.cls_token_id, 
-            self.tokenizer.mask_token_id,
-            self.tokenizer.pad_token_id,
-            self.tokenizer.unk_token_id,
-        ]
-        sparse_embedding = torch.max(sparse_embedding, dim=1).values
-        sparse_embedding[:, unused_tokens] *= 0.
-        return sparse_embedding
-
+        colbert_vecs = self.colbert_linear(last_hidden_state[:, 1:])
+        colbert_vecs = colbert_vecs * mask[:, 1:][:, :, None].float()
+        return colbert_vecs
+    
     def gradient_checkpointing_enable(self):
-        self.bert.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
+        self.encoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
     
     def forward(self, bert_inputs, return_sparse_weights=False):
         input_ids = bert_inputs['input_ids']
         attention_mask = bert_inputs.get('attention_mask', None)
         token_type_ids = bert_inputs.get('token_type_ids', None)
         
-        model_out = self.bert(input_ids, attention_mask, token_type_ids, output_hidden_states=True, return_dict=True)
+        model_out = self.encoder(input_ids, attention_mask, token_type_ids)
         
         # TODO: 定义一个Embedding模型的标准输出
         res = dict()
         
         if self.use_dense:
-            dense_vectors = self._dense_embedding(model_out.last_hidden_state, attention_mask)
+            dense_vectors = self.dense_embedding(model_out.last_hidden_state, attention_mask)
             res['dense_vectors'] = dense_vectors
 
         if self.use_sparse:
-            res['sparse_vectors'] = self._sparse_embedding(model_out.last_hidden_state, input_ids)
+            res['sparse_vectors'] = self.sparse_embedding(model_out.last_hidden_state, input_ids)
         
         if self.use_sparse and return_sparse_weights:
             res['sparse_weights'] = self._sparse_weights(model_out.last_hidden_state, input_ids)
+        
+        if self.use_colbert:
+            res['colbert_vectors'] = self.colbert_embedding(model_out.last_hidden_state, attention_mask)
         
         return res
     
@@ -231,7 +290,9 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
             max_length = self.max_length
 
         dense_vecs_list = []
+        sparse_vecs_list = []
         sparse_weights_list = []
+        colbert_vecs_list = []
         for _, batch_texts in batch_generator(texts, batch_size):
             with torch.no_grad():
                 encoded = self.tokenizer(
@@ -248,8 +309,12 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                 )
                 if 'dense_vectors' in res:
                     dense_vecs_list.append(res['dense_vectors'])
+                if 'sparse_vectors' in res:
+                    sparse_vecs_list.append(res['sparse_vectors'])
                 if "sparse_weights" in res:
                     sparse_weights_list.extend(res['sparse_weights'])
+                if "colbert_vectors" in res:
+                    colbert_vecs_list.append(res['colbert_vectors'])
         
         ret_dict = {}
         if len(dense_vecs_list) > 0:
@@ -261,13 +326,32 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
 
             if self.infer_dense_dim != self.dense_dim:
                 dense_vectors = dense_vectors[:, :self.infer_dense_dim]
+            
             if do_normalize:
                 dense_vectors = normalize_vectors(dense_vectors)
-
             ret_dict['dense_vectors'] = dense_vectors
+
+        if len(sparse_vecs_list) > 0:
+            if len(sparse_vecs_list) == 1:
+                sparse_vectors = sparse_vecs_list[0]
+            elif len(sparse_vecs_list) > 1:
+                sparse_vectors = torch.cat(sparse_vecs_list, dim=0)
+            sparse_vectors = sparse_vectors.cpu().numpy()
+            ret_dict['sparse_vectors'] = sparse_vectors
 
         if sparse_weights_list:
             ret_dict['sparse_weights'] = sparse_weights_list
+        
+        if len(colbert_vecs_list) > 0:
+            if len(colbert_vecs_list) == 1:
+                colbert_vectors = colbert_vecs_list[0]
+            elif len(colbert_vecs_list) > 1:
+                colbert_vectors = torch.cat(colbert_vecs_list, dim=0)
+            colbert_vectors = colbert_vectors.cpu().numpy()
+            if do_normalize:
+                colbert_vectors = normalize_vectors(colbert_vectors)
+
+            ret_dict['colbert_vectors'] = colbert_vectors
 
         return ret_dict
     
@@ -279,7 +363,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                  v in state_dict.items()})
             return state_dict
 
-        self.bert.save_pretrained(output_dir, state_dict=_trans_state_dict(self.bert.state_dict()))
+        self.encoder.save_pretrained(output_dir, state_dict=_trans_state_dict(self.encoder.state_dict()))
         logger.info(f"bert model saved to {output_dir}")
 
         self.tokenizer.save_pretrained(output_dir)

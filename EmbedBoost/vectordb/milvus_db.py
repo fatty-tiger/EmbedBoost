@@ -88,8 +88,7 @@ class MilvusVectorStore(BaseVectorStore):
             texts = [x['text'] for x in batch_docs]
             encoded = embedder.encode(texts, max_length=max_length)
             if self.use_dense:
-                dense_vectors = normalize_vectors(encoded['dense_vectors'][:, :self.dense_dim])
-                dense_vectors = dense_vectors.tolist()
+                dense_vectors = encoded['dense_vectors']
             for i, doc in enumerate(batch_docs):
                 entity = {
                     "pk": doc['pk'],

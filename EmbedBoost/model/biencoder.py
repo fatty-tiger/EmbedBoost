@@ -18,27 +18,23 @@ logger = logging.getLogger(__name__)
 class BiEncoder:
     def __init__(
             self,
-            q_encoder: nn.Module,
-            p_encoder: nn.Module,
+            q_model: nn.Module,
+            p_model: nn.Module,
             loss_fn: Callable[..., Dict[str, Tensor]],
             get_rep_fn: Callable[..., Tensor] = None
     ):
-        self.q_encoder = q_encoder
-        self.p_encoder = p_encoder
+        self.q_model = q_model
+        self.p_model = p_model
         self.loss_fn = loss_fn
         self.get_rep_fn = get_rep_fn
     
     def __call__(self, q_inputs, p_inputs, n_inputs, model_kwargs, loss_kwargs):
-        q_encoded = self.q_encoder(q_inputs, **model_kwargs)
-        p_encoded = self.p_encoder(p_inputs, **model_kwargs)
-        q_vectors = self.get_rep_fn(q_encoded)
-        p_vectors = self.get_rep_fn(p_encoded)
-        n_vectors = None
+        q_encoded = self.q_model(q_inputs, **model_kwargs)
+        p_encoded = self.p_model(p_inputs, **model_kwargs)
+        n_encoded = None
         if n_inputs is not None:
-            n_encoded = self.p_encoder(n_inputs, **model_kwargs)
-            n_vectors = self.get_rep_fn(n_encoded)
-        loss = self.loss_fn(q_vectors, p_vectors, n_vectors=n_vectors, **loss_kwargs)
-        # backward一定要在这里做吗？
+            n_encoded = self.p_model(n_inputs, **model_kwargs)
+        loss = self.loss_fn(q_encoded, p_encoded, n_encoded, **loss_kwargs)
         loss.backward()
         return loss
 
@@ -51,8 +47,8 @@ class BiEncoderWithGradCache:
     """
     def __init__(
             self,
-            q_encoder: nn.Module,
-            p_encoder: nn.Module,
+            q_model: nn.Module,
+            p_model: nn.Module,
             chunk_size: int,
             loss_fn: Callable[..., Dict[str, Tensor]],
             split_input_fn: Callable[[Any, int], Any] = None,
@@ -74,11 +70,11 @@ class BiEncoderWithGradCache:
         :param fp16: If True, run mixed precision training, which requires scaler to also be set.
         :param scaler: A GradScaler object for automatic mixed precision training.
         """
-        self.q_encoder = q_encoder
-        self.p_encoder = p_encoder
-
+        self.q_model = q_model
+        self.p_model = p_model
+        self.q_encoder = q_model.encoder
+        self.p_encoder = p_model.encoder
         self.chunk_size = chunk_size
-
         self.split_input_fn = split_input_fn
         self.get_rep_fn = get_rep_fn
         self.loss_fn = loss_fn
@@ -93,37 +89,45 @@ class BiEncoderWithGradCache:
 
     def __call__(self, q_inputs, p_inputs, n_inputs, model_kwargs, loss_kwargs, no_sync_except_last=False):
         if no_sync_except_last:
-            assert isinstance(self.q_encoder, nn.parallel.DistributedDataParallel)
-            assert isinstance(self.p_encoder, nn.parallel.DistributedDataParallel)
+            assert isinstance(self.q_model, nn.parallel.DistributedDataParallel)
+            assert isinstance(self.p_model, nn.parallel.DistributedDataParallel)
             # assert all(map(lambda m: isinstance(m, nn.parallel.DistributedDataParallel), self.models)), \
             #     'Some of models are not wrapped in DistributedDataParallel. Make sure you are running DDP with ' \
             #     'proper initializations.'
         
-        q_inputs = self.split_inputs(q_inputs, self.chunk_size)
-        p_inputs = self.split_inputs(p_inputs, self.chunk_size)
+        # TODO: split单独设置变量
+        # print(type(q_inputs))
+        # print(q_inputs)
+        q_inputs_list = self.split_inputs(q_inputs, self.chunk_size)
+        p_inputs_list = self.split_inputs(p_inputs, self.chunk_size)
         if n_inputs is not None:
             # logger.info(f"n_inputs: {n_inputs['input_ids'].shape}")
-            n_inputs = self.split_inputs(n_inputs, self.chunk_size)
+            n_inputs_list = self.split_inputs(n_inputs, self.chunk_size)
             # logger.info(f"n_inputs after split: {n_inputs[0]['input_ids'].shape}")
-
-        q_reps, q_rnd_states = self.forward_no_grad(self.q_encoder, q_inputs, model_kwargs)
-        p_reps, p_rnd_states = self.forward_no_grad(self.p_encoder, p_inputs, model_kwargs)
+        
+        # graph-less获取编码结果；
+        q_reps, q_rnd_states = self.forward_no_grad(self.q_encoder, q_inputs_list, model_kwargs)
+        p_reps, p_rnd_states = self.forward_no_grad(self.p_encoder, p_inputs_list, model_kwargs)
         n_reps, n_rnd_states = None, None
         if n_inputs is not None:
-            n_reps, n_rnd_states = self.forward_no_grad(self.p_encoder, n_inputs, model_kwargs)
+            n_reps, n_rnd_states = self.forward_no_grad(self.p_encoder, n_inputs_list, model_kwargs)
 
-        q_cache, p_cache, n_cache, loss = self.build_cache(q_reps, p_reps, n_reps, **loss_kwargs)
+        # 计算reps -> loss这部分的反向传播梯度值
+        # 返回的loss是detach的
+        # q_cache就是对应到q_reps的梯度值
+        q_cache, p_cache, n_cache, loss = self.build_cache(q_inputs, p_inputs, q_reps, p_reps, n_inputs, n_reps, **loss_kwargs)
         
-        # 关键步骤：split cache
+        # split cache
         q_cache = q_cache.split(self.chunk_size)
         p_cache = p_cache.split(self.chunk_size)
         if n_cache is not None:
             n_cache = n_cache.split(self.chunk_size)
         
-        self.forward_backward(self.q_encoder, q_inputs, q_cache, q_rnd_states, model_kwargs, no_sync_except_last=no_sync_except_last)
-        self.forward_backward(self.p_encoder, p_inputs, p_cache, p_rnd_states, model_kwargs, no_sync_except_last=no_sync_except_last)
+        # 然后对encoder进行重新的前向+反向传播
+        self.forward_backward(self.q_encoder, q_inputs_list, q_cache, q_rnd_states, model_kwargs, no_sync_except_last=no_sync_except_last)
+        self.forward_backward(self.p_encoder, p_inputs_list, p_cache, p_rnd_states, model_kwargs, no_sync_except_last=no_sync_except_last)
         if n_inputs is not None:
-            self.forward_backward(self.p_encoder, n_inputs, n_cache, n_rnd_states, model_kwargs, no_sync_except_last=no_sync_except_last)
+            self.forward_backward(self.p_encoder, n_inputs_list, n_cache, n_rnd_states, model_kwargs, no_sync_except_last=no_sync_except_last)
 
         return loss
 
@@ -190,7 +194,7 @@ class BiEncoderWithGradCache:
         if self.get_rep_fn is not None:
             return self.get_rep_fn(model_out)
         else:
-            return model_out
+            return model_out.last_hidden_state
 
     def forward_no_grad(
             self,
@@ -210,15 +214,20 @@ class BiEncoderWithGradCache:
         with torch.no_grad():
             for x in model_inputs:
                 input_tensors = self.get_input_tensors(x)
+                # print(f'type of input_tensors: {type(input_tensors)}')
+                # print(input_tensors)
                 rnd_states.append(RandContext(*input_tensors))
-                y = model(x, **model_kwargs)
-                model_reps.append(self.get_reps(y))
+                # y = model(x, **model_kwargs)
+                y = model(*input_tensors, **model_kwargs)
+                reps = self.get_reps(y)
+                # print(f'shape of reps: {reps.shape}')
+                model_reps.append(reps)
 
         # concatenate all sub-batch representations
         model_reps = torch.cat(model_reps, dim=0)
         return model_reps, rnd_states
 
-    def build_cache(self, q_reps: Tensor, p_reps: Tensor, n_reps: Union[Tensor, None], **loss_kwargs) -> Tuple[List[Tensor], Tensor]:
+    def build_cache(self, q_inputs, p_inputs, q_reps: Tensor, p_reps: Tensor, n_inputs: Union[Dict[str, Tensor], None], n_reps: Union[Tensor, None], **loss_kwargs) -> Tuple[List[Tensor], Tensor]:
         """
         Compute the gradient cache
         :param reps: Computed representations from all encoder models
@@ -230,9 +239,35 @@ class BiEncoderWithGradCache:
         if n_reps is not None:
             n_reps = n_reps.detach().requires_grad_()
         
+        q_reps_dict = {}
+        p_reps_dict = {}
+        n_reps_dict = {}
+
+        if self.q_model.use_dense:
+            q_dense_reps = self.q_model.dense_embedding(q_reps, q_inputs['attention_mask'])
+            q_reps_dict['dense_vectors'] = q_dense_reps
+        if self.p_model.use_dense:
+            p_dense_reps = self.p_model.dense_embedding(p_reps, p_inputs['attention_mask'])
+            p_reps_dict['dense_vectors'] = p_dense_reps
+            if n_reps is not None:
+                n_dense_reps = self.p_model.dense_embedding(n_reps, n_inputs['attention_mask'])
+                n_reps_dict['dense_vectors'] = n_dense_reps
+        if self.q_model.use_sparse:
+            q_sparse_reps = self.q_model.sparse_embedding(q_reps, q_inputs['input_ids'])
+            q_reps_dict['sparse_vectors'] = q_sparse_reps
+        if self.p_model.use_sparse:
+            p_sparse_reps = self.p_model.sparse_embedding(p_reps, p_inputs['input_ids'])
+            p_reps_dict['sparse_vectors'] = p_sparse_reps
+            if n_reps is not None:
+                n_sparse_reps = self.p_model.sparse_embedding(n_reps, n_inputs['input_ids'])
+                n_reps_dict['sparse_vectors'] = n_sparse_reps
+        
         with autocast() if self.fp16 else nullcontext():
             # 从这里出发，向前推导参数格式
-            loss = self.loss_fn(q_reps, p_reps, n_reps, **loss_kwargs)
+            # loss = self.loss_fn(q_reps, p_reps, n_reps, **loss_kwargs)
+            if not n_reps_dict:
+                n_reps_dict = None
+            loss = self.loss_fn(q_reps_dict, p_reps_dict, n_reps_dict, **loss_kwargs)
 
         if self.fp16:
             self.scaler.scale(loss).backward()
@@ -267,15 +302,13 @@ class BiEncoderWithGradCache:
         else:
             sync_contexts = [nullcontext for _ in range(len(model_inputs))]
 
-        # TODO: 写脚本证明，对于拆分的多个输入，梯度累加后和不拆分直接计算的梯度相同
         for x, state, gradient, sync_context in zip(model_inputs, random_states, cached_gradients, sync_contexts):
             with sync_context():
                 with state:
-                    y = model(x, **model_kwargs)
+                    y = model(**x, **model_kwargs)
+                
                 reps = self.get_reps(y)
 
-                # 这里为什么要flatten
                 surrogate = torch.dot(reps.flatten(), gradient.flatten())
 
-                # 这个backward一定要在这里做么？
                 surrogate.backward()
