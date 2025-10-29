@@ -96,14 +96,10 @@ class BiEncoderWithGradCache:
             #     'proper initializations.'
         
         # TODO: split单独设置变量
-        # print(type(q_inputs))
-        # print(q_inputs)
         q_inputs_list = self.split_inputs(q_inputs, self.chunk_size)
         p_inputs_list = self.split_inputs(p_inputs, self.chunk_size)
         if n_inputs is not None:
-            # logger.info(f"n_inputs: {n_inputs['input_ids'].shape}")
             n_inputs_list = self.split_inputs(n_inputs, self.chunk_size)
-            # logger.info(f"n_inputs after split: {n_inputs[0]['input_ids'].shape}")
         
         # graph-less获取编码结果；
         q_reps, q_rnd_states = self.forward_no_grad(self.q_encoder, q_inputs_list, model_kwargs)
@@ -115,6 +111,8 @@ class BiEncoderWithGradCache:
         # 计算reps -> loss这部分的反向传播梯度值
         # 返回的loss是detach的
         # q_cache就是对应到q_reps的梯度值
+        # print('q_reps:', q_reps.shape)
+        # print('p_reps:', p_reps.shape)
         q_cache, p_cache, n_cache, loss = self.build_cache(q_inputs, p_inputs, q_reps, p_reps, n_inputs, n_reps, **loss_kwargs)
         
         # split cache
@@ -185,6 +183,7 @@ class BiEncoderWithGradCache:
 
         else:
             return []
+
     def get_reps(self, model_out) -> Tensor:
         """
         Return representation tensor from generic model output
@@ -214,10 +213,7 @@ class BiEncoderWithGradCache:
         with torch.no_grad():
             for x in model_inputs:
                 input_tensors = self.get_input_tensors(x)
-                # print(f'type of input_tensors: {type(input_tensors)}')
-                # print(input_tensors)
                 rnd_states.append(RandContext(*input_tensors))
-                # y = model(x, **model_kwargs)
                 y = model(*input_tensors, **model_kwargs)
                 reps = self.get_reps(y)
                 # print(f'shape of reps: {reps.shape}')
@@ -239,35 +235,47 @@ class BiEncoderWithGradCache:
         if n_reps is not None:
             n_reps = n_reps.detach().requires_grad_()
         
-        q_reps_dict = {}
-        p_reps_dict = {}
-        n_reps_dict = {}
-
-        if self.q_model.use_dense:
-            q_dense_reps = self.q_model.dense_embedding(q_reps, q_inputs['attention_mask'])
-            q_reps_dict['dense_vectors'] = q_dense_reps
-        if self.p_model.use_dense:
-            p_dense_reps = self.p_model.dense_embedding(p_reps, p_inputs['attention_mask'])
-            p_reps_dict['dense_vectors'] = p_dense_reps
-            if n_reps is not None:
-                n_dense_reps = self.p_model.dense_embedding(n_reps, n_inputs['attention_mask'])
-                n_reps_dict['dense_vectors'] = n_dense_reps
-        if self.q_model.use_sparse:
-            q_sparse_reps = self.q_model.sparse_embedding(q_reps, q_inputs['input_ids'])
-            q_reps_dict['sparse_vectors'] = q_sparse_reps
-        if self.p_model.use_sparse:
-            p_sparse_reps = self.p_model.sparse_embedding(p_reps, p_inputs['input_ids'])
-            p_reps_dict['sparse_vectors'] = p_sparse_reps
-            if n_reps is not None:
-                n_sparse_reps = self.p_model.sparse_embedding(n_reps, n_inputs['input_ids'])
-                n_reps_dict['sparse_vectors'] = n_sparse_reps
+        # TODO：改为encode，并且在encode中normalize
+        q_encoded = self.q_model.cached_forward(q_reps, q_inputs['input_ids'], q_inputs['attention_mask'])
+        p_encoded = self.p_model.cached_forward(p_reps, p_inputs['input_ids'], p_inputs['attention_mask'])
+        if n_reps is not None:
+            n_encoded = self.p_model.cached_forward(n_reps, n_inputs['input_ids'], n_inputs['attention_mask'])
+        else:
+            n_encoded = None
         
+        # q_reps_dict = {}
+        # p_reps_dict = {}
+        # n_reps_dict = {}
+        # if self.q_model.use_dense:
+        #     q_dense_reps = self.q_model.dense_embedding(q_reps, q_inputs['attention_mask'])
+        #     q_reps_dict['dense_vectors'] = q_dense_reps
+        # if self.p_model.use_dense:
+        #     p_dense_reps = self.p_model.dense_embedding(p_reps, p_inputs['attention_mask'])
+        #     p_reps_dict['dense_vectors'] = p_dense_reps
+        #     if n_reps is not None:
+        #         n_dense_reps = self.p_model.dense_embedding(n_reps, n_inputs['attention_mask'])
+        #         n_reps_dict['dense_vectors'] = n_dense_reps
+        
+        # if self.q_model.use_sparse:
+        #     q_sparse_reps = self.q_model.sparse_embedding(q_reps, q_inputs['input_ids'])
+        #     q_reps_dict['sparse_vectors'] = q_sparse_reps
+        # if self.p_model.use_sparse:
+        #     p_sparse_reps = self.p_model.sparse_embedding(p_reps, p_inputs['input_ids'])
+        #     p_reps_dict['sparse_vectors'] = p_sparse_reps
+        #     if n_reps is not None:
+        #         n_sparse_reps = self.p_model.sparse_embedding(n_reps, n_inputs['input_ids'])
+        #         n_reps_dict['sparse_vectors'] = n_sparse_reps
+        
+        # if self.q_model.use_colbert:
+        #     q_reps_dict['colbert_vectors'] = self.q_model.colbert_embedding(q_reps, q_inputs['input_ids'])
+        # if self.p_model.use_colbert:
+        #     p_reps_dict['colbert_vectors'] = self.p_model.colbert_embedding(p_reps, p_inputs['input_ids'])
+        #     if n_reps is not None:
+        #         n_reps_dict['colbert_vectors'] = self.p_model.colbert_embedding(n_reps, n_inputs['input_ids'])
+
         with autocast() if self.fp16 else nullcontext():
             # 从这里出发，向前推导参数格式
-            # loss = self.loss_fn(q_reps, p_reps, n_reps, **loss_kwargs)
-            if not n_reps_dict:
-                n_reps_dict = None
-            loss = self.loss_fn(q_reps_dict, p_reps_dict, n_reps_dict, **loss_kwargs)
+            loss = self.loss_fn(q_encoded, p_encoded, n_encoded, **loss_kwargs)
 
         if self.fp16:
             self.scaler.scale(loss).backward()

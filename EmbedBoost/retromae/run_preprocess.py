@@ -10,6 +10,7 @@ from EmbedBoost.common import log_util
 
 logger = logging.getLogger(__name__)
 
+
 def load_datas(dataset_name, input_dir):
     if dataset_name == 'multicpr_ecom':    
         datas = []
@@ -29,7 +30,18 @@ def load_datas(dataset_name, input_dir):
                 datas.append({'text': text})
         logger.info(f"dataset-{dataset_name} loaded, {len(datas)} documents in total.")
         return datas
-
+    if dataset_name == 'qts':    
+        datas = []
+        with open(os.path.join(input_dir, 'qts_paired.jsonl')) as f:
+            for line in f:
+                d = json.loads(line.strip())
+                text = d['query'] + ' ' + d['positive']
+                datas.append({'text': text})
+                # if len(datas) >= 50000:
+                #     break
+        logger.info(f"dataset-{dataset_name} loaded, {len(datas)} documents in total.")
+        return datas
+    
     raise ValueError('Unknown dataset name: {}'.format(dataset_name))
 
 

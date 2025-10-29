@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from datetime import datetime
 
 from EmbedBoost.model.bgem3 import BGEM3Embedder
-from EmbedBoost.model.biencoder_v2 import BiEncoder, BiEncoderWithGradCache
+from EmbedBoost.model.biencoder import BiEncoder, BiEncoderWithGradCache
 from EmbedBoost.loss.biencoder_loss import MultiInfoNCELoss
 from EmbedBoost.dataset.biencoder_dataset import BiEncoderDataset
 
@@ -61,7 +61,9 @@ def train(args):
         use_dense=args.use_dense,
         dense_pooling=args.dense_pooling,
         dense_dim=args.dense_dim,
-        use_sparse=args.use_sparse
+        use_sparse=args.use_sparse,
+        use_colbert=args.use_colbert,
+        colbert_dim=args.colbert_dim
     )
     q_model.to(device)
     q_tokenizer = q_model.tokenizer
@@ -72,7 +74,9 @@ def train(args):
             use_dense=args.use_dense,
             dense_pooling=args.dense_pooling,
             dense_dim=args.dense_dim,
-            use_sparse=args.use_sparse
+            use_sparse=args.use_sparse,
+            use_colbert=args.use_colbert,
+            colbert_dim=args.colbert_dim
         )
         p_model.to(device)
         p_tokenizer = p_model.tokenizer
@@ -163,10 +167,12 @@ def train(args):
                 if not os.path.exists(q_save_dir):
                     os.makedirs(q_save_dir)
                 q_model.save(q_save_dir)
-                p_save_dir = os.path.join(save_dir, "p_model")
-                if not os.path.exists(p_save_dir):
-                    os.makedirs(p_save_dir)
-                p_model.save(p_save_dir)
+
+                if args.p_model_name_or_path is not None:
+                    p_save_dir = os.path.join(save_dir, "p_model")
+                    if not os.path.exists(p_save_dir):
+                        os.makedirs(p_save_dir)
+                    p_model.save(p_save_dir)
         
         if args.save_epochs > 0 and epoch % args.save_epochs == 0:
             save_dir = os.path.join(args.output_dir, f'ckp_epoch_{epoch}_step_{step}')
@@ -176,11 +182,13 @@ def train(args):
             if not os.path.exists(q_save_dir):
                 os.makedirs(q_save_dir)
             q_model.save(q_save_dir)
-            p_save_dir = os.path.join(save_dir, "p_model")
-            if not os.path.exists(p_save_dir):
-                os.makedirs(p_save_dir)
-            p_model.save(p_save_dir)
-        
+            
+            if args.p_model_name_or_path is not None:
+                p_save_dir = os.path.join(save_dir, "p_model")
+                if not os.path.exists(p_save_dir):
+                    os.makedirs(p_save_dir)
+                p_model.save(p_save_dir)
+
             # save optimizer ckp
             training_state = {
                 'epoch': epoch,
@@ -270,6 +278,17 @@ def main():
         "--use_sparse",
         action="store_true",
         help="使用稀疏向量 (默认: false)"
+    )
+    parser.add_argument(
+        "--use_colbert",
+        action="store_true",
+        help="use_colbert (默认: false)"
+    )
+    parser.add_argument(
+        "--colbert_dim",
+        type=int,
+        default=64,
+        help="colbert_dim"
     )
     parser.add_argument(
         "--max_query_length",

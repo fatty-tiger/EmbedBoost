@@ -5,13 +5,14 @@ Colbert part removed
 """
 import os
 import logging
-import onnxruntime
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 import numpy as np
 
 from typing import List, Dict, Union, Optional
+from torch import Tensor
 from transformers import AutoConfig
 from transformers import AutoModel
 from transformers import AutoTokenizer
@@ -19,7 +20,6 @@ from tqdm import tqdm
 
 from EmbedBoost.abc.embedder import BaseEmbedder
 from EmbedBoost.common.file_util import batch_generator
-from EmbedBoost.common.tensor_util import normalize_vectors
 
 
 logger = logging.getLogger(__name__)
@@ -211,14 +211,14 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
         # self.sparse_unused_tokens.to(input_ids.device)
         token_weights = torch.relu(self.sparse_linear(last_hidden_state))
         token_weights = token_weights.squeeze(-1)
-        # cond = (
-        #     (input_ids != self.tokenizer.cls_token_id) & \
-        #     (input_ids != self.tokenizer.mask_token_id) & \
-        #     (input_ids != self.tokenizer.pad_token_id) & \
-        #     (input_ids != self.tokenizer.unk_token_id) & \
-        #     (input_ids != self.tokenizer.sep_token_id)
-        # )
-        cond = (input_ids >= 5)
+        cond = (
+            (input_ids != self.tokenizer.cls_token_id) & \
+            (input_ids != self.tokenizer.mask_token_id) & \
+            (input_ids != self.tokenizer.pad_token_id) & \
+            (input_ids != self.tokenizer.unk_token_id) & \
+            (input_ids != self.tokenizer.sep_token_id)
+        )
+        # cond = (input_ids >= 5)
         mask = cond.nonzero(as_tuple=True)
         indices = torch.stack([mask[0], input_ids[mask]], dim=0)
         values = token_weights[mask]
@@ -243,32 +243,67 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
     def gradient_checkpointing_enable(self):
         self.encoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
     
+    def cached_forward(self, last_hidden_state, input_ids, attention_mask, return_sparse_weights=False):
+        res = dict()
+        
+        res['input_ids'] = input_ids
+        res['attention_mask'] = attention_mask
+
+        if self.use_dense:
+            dense_vectors = self.dense_embedding(last_hidden_state, attention_mask)
+            dense_vectors = F.normalize(dense_vectors, dim=-1)
+            res['dense_vectors'] = dense_vectors
+
+        if self.use_sparse:
+            res['sparse_vectors'] = self.sparse_embedding(last_hidden_state, input_ids)
+        
+        if self.use_sparse and return_sparse_weights:
+            res['sparse_weights'] = self._sparse_weights(last_hidden_state, input_ids)
+        
+        if self.use_colbert:
+            colbert_vectors = self.colbert_embedding(last_hidden_state, attention_mask)
+            colbert_vectors = F.normalize(colbert_vectors, dim=-1)
+            res['colbert_vectors'] = colbert_vectors
+
+        return res
+    
     def forward(self, bert_inputs, return_sparse_weights=False):
         input_ids = bert_inputs['input_ids']
         attention_mask = bert_inputs.get('attention_mask', None)
         token_type_ids = bert_inputs.get('token_type_ids', None)
         
-        model_out = self.encoder(input_ids, attention_mask, token_type_ids)
-        
-        # TODO: 定义一个Embedding模型的标准输出
-        res = dict()
-        
-        if self.use_dense:
-            dense_vectors = self.dense_embedding(model_out.last_hidden_state, attention_mask)
-            res['dense_vectors'] = dense_vectors
+        model_out = self.encoder(input_ids, attention_mask, token_type_ids).last_hidden_state
+        last_hidden_state = model_out.last_hidden_state
 
-        if self.use_sparse:
-            res['sparse_vectors'] = self.sparse_embedding(model_out.last_hidden_state, input_ids)
-        
-        if self.use_sparse and return_sparse_weights:
-            res['sparse_weights'] = self._sparse_weights(model_out.last_hidden_state, input_ids)
-        
-        if self.use_colbert:
-            res['colbert_vectors'] = self.colbert_embedding(model_out.last_hidden_state, attention_mask)
-        
-        return res
-    
-    def encode(self, texts: List[str], max_length: int = 512, batch_size: int = 4000, do_normalize=True) -> Dict[str, Union[np.ndarray, None]]:
+        return self.cached_forward(last_hidden_state, input_ids, attention_mask, return_sparse_weights=return_sparse_weights)
+
+    def _get_queries_attention_mask(self, queries: Union[Dict[str, Tensor], List[Dict[str, Tensor]]]):
+        """padding attention mask for colbert
+
+        Args:
+            queries (Union[Dict[str, Tensor], List[Dict[str, Tensor]]]): Input queries.
+
+        Returns:
+            torch.Tensor: The query attention mask.
+        """
+        if not isinstance(queries, list):
+            q_mask = queries['attention_mask']
+        else:
+            q_mask_list = [sub_features['attention_mask'] for sub_features in queries]
+            _length = max([mask.shape[1] for mask in q_mask_list])
+            if self.tokenizer.padding_side == 'right':
+                q_mask = torch.cat([
+                    F.pad(mask, (0, _length - mask.shape[1]), value=0)
+                    for mask in q_mask_list
+                ], dim=0)
+            else:
+                q_mask = torch.cat([
+                    F.pad(mask, (_length - mask.shape[1], 0), value=0)
+                    for mask in q_mask_list
+                ], dim=0)
+        return q_mask
+
+    def encode(self, texts: List[str], max_length: int = 512, batch_size: int = 4000) -> Dict[str, Union[np.ndarray, None]]:
         """
         Encode a list of text strings into embeddings.
         
@@ -282,13 +317,15 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
         """
 
         if len(texts) == 0:
-            return {"dense_vectors": None, "sparse_vectors": None}
+            return None
+        
         
         device = next(self.parameters()).device
 
         if max_length == -1:
             max_length = self.max_length
 
+        attention_mask_list = []
         dense_vecs_list = []
         sparse_vecs_list = []
         sparse_weights_list = []
@@ -307,6 +344,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                     encoded,
                     return_sparse_weights=True
                 )
+                attention_mask_list.append(encoded['attention_mask'])
                 if 'dense_vectors' in res:
                     dense_vecs_list.append(res['dense_vectors'])
                 if 'sparse_vectors' in res:
@@ -317,18 +355,21 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                     colbert_vecs_list.append(res['colbert_vectors'])
         
         ret_dict = {}
+        
+        if len(attention_mask_list) == 1:
+            attention_mask = attention_mask_list[0]
+        elif len(dense_vecs_list) > 1:
+            attention_mask = torch.cat(attention_mask_list, dim=0)
+        ret_dict['attention_mask'] = attention_mask
+
         if len(dense_vecs_list) > 0:
             if len(dense_vecs_list) == 1:
                 dense_vectors = dense_vecs_list[0]
             elif len(dense_vecs_list) > 1:
                 dense_vectors = torch.cat(dense_vecs_list, dim=0)
-            dense_vectors = dense_vectors.cpu().numpy()
-
-            if self.infer_dense_dim != self.dense_dim:
-                dense_vectors = dense_vectors[:, :self.infer_dense_dim]
-            
-            if do_normalize:
-                dense_vectors = normalize_vectors(dense_vectors)
+            # dense_vectors = dense_vectors.cpu().numpy()
+            # if self.infer_dense_dim != self.dense_dim:
+            #     dense_vectors = dense_vectors[:, :self.infer_dense_dim]
             ret_dict['dense_vectors'] = dense_vectors
 
         if len(sparse_vecs_list) > 0:
@@ -336,7 +377,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                 sparse_vectors = sparse_vecs_list[0]
             elif len(sparse_vecs_list) > 1:
                 sparse_vectors = torch.cat(sparse_vecs_list, dim=0)
-            sparse_vectors = sparse_vectors.cpu().numpy()
+            # sparse_vectors = sparse_vectors.cpu().numpy()
             ret_dict['sparse_vectors'] = sparse_vectors
 
         if sparse_weights_list:
@@ -347,10 +388,9 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                 colbert_vectors = colbert_vecs_list[0]
             elif len(colbert_vecs_list) > 1:
                 colbert_vectors = torch.cat(colbert_vecs_list, dim=0)
-            colbert_vectors = colbert_vectors.cpu().numpy()
-            if do_normalize:
-                colbert_vectors = normalize_vectors(colbert_vectors)
-
+            # colbert_vectors = colbert_vectors.cpu().numpy()
+            # if do_normalize:
+            #     colbert_vectors = normalize_vectors(colbert_vectors)
             ret_dict['colbert_vectors'] = colbert_vectors
 
         return ret_dict
@@ -379,12 +419,19 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                        os.path.join(output_dir, 'sparse_linear.pt'))
             logger.info(f"sparse linear saved to {os.path.join(output_dir, 'sparse_linear.pt')}")
 
+        if self.use_colbert:
+            torch.save(_trans_state_dict(self.colbert_linear.state_dict()),
+                       os.path.join(output_dir, 'colbert_linear.pt'))
+            logger.info(f"colbert_linear linear saved to {os.path.join(output_dir, 'colbert_linear.pt')}")
+
 
 class OnnxInferer(object):
     def __init__(self, model_id_or_path, device='cpu'):
         self.tokenizer = AutoTokenizer.from_pretrained(model_id_or_path)
         self.device = torch.device(device)
         onnx_fpath = os.path.join(model_id_or_path, "model.onnx")
+
+        import onnxruntime
         ort_sessionopts = onnxruntime.SessionOptions()
         providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if 'cuda' in device else ['CPUExecutionProvider']
         logging.info(f"loading onnx mmodel from {onnx_fpath}")
