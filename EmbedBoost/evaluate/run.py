@@ -15,10 +15,9 @@ from EmbedBoost.abc.embedder import BaseEmbedder
 from EmbedBoost.model.bgem3 import BGEM3Embedder
 from EmbedBoost.abc.vectordb_base import BaseVectorStore
 from EmbedBoost.vectordb.milvus_db import MilvusVectorStore
-from EmbedBoost.evaluate.multicpr_dataset import MultiCprRetrievalDataset
-from EmbedBoost.evaluate.qts_dataset import QTSRetrievalEvalDataset
 from EmbedBoost.evaluate import evaluate_metric
 from EmbedBoost.common.tensor_util import normalize_vectors
+
 
 LOG_DATE_FMT = '%Y‐%m‐%d %H:%M:%S'
 LOG_FMT = '%(levelname)s: %(asctime)s: %(filename)s:%(lineno)d * %(thread)d %(message)s'
@@ -27,6 +26,9 @@ logging.basicConfig(level=logging.INFO,
                     datefmt=LOG_DATE_FMT,
                     format=LOG_FMT)
 logger = logging.getLogger(__name__)
+
+BASE_DATA_DIR = "/home/jiangjie/zkh_search_r1/FattyEmbedding/data"
+
 
 def rrf_ranking(sorted_lists, topk, rank_constant=60):
     score_dict = defaultdict(float)
@@ -78,9 +80,7 @@ def retrieve(query_list: List[Dict[str, Any]],
 
         results_to_merge = []
         if "dense" in retrieval_modes:
-            query_dense_vector = query_encoded["dense_vectors"][i:i+1, :embedder.infer_dense_dim]
-            query_dense_vector = normalize_vectors(query_dense_vector)
-
+            query_dense_vector = query_encoded["dense_vectors"][i:i+1, :]
             dense_retrieved_docs = vector_store.dense_retrieval(query_dense_vector, topk)
             result_item['dense_retrieved_docs'] = dense_retrieved_docs[0]
             if merge_strategy:
@@ -108,31 +108,17 @@ def retrieve(query_list: List[Dict[str, Any]],
 
 
 def get_eval_dataset(dataset_name):
-    if dataset_name == 'multicpr-ecom-train':
-        data_dir = "/data/jiangjie/FattyEmbedding/data/multicpr/ecom"
-        query_fpath = os.path.join(data_dir, "ecom_train_query.tsv")
-        query_doc_rel_fpath = os.path.join(data_dir, "ecom_train.tsv")
-        corpus_fpath = os.path.join(data_dir, "ecom_corpus.tsv")
+    if dataset_name == 'multicpr_med':
+        from EmbedBoost.evaluate.multicpr_dataset import MultiCprRetrievalDataset
+        query_fpath = os.path.join(BASE_DATA_DIR, dataset_name, "med_dev_query.tsv")
+        query_doc_rel_fpath = os.path.join(BASE_DATA_DIR, dataset_name, "med_dev.tsv")
+        corpus_fpath = os.path.join(BASE_DATA_DIR, dataset_name, "med_corpus.tsv")
         return MultiCprRetrievalDataset(query_fpath, query_doc_rel_fpath, corpus_fpath)
-    if dataset_name == 'multicpr-ecom-dev':
-        data_dir = "/data/jiangjie/FattyEmbedding/data/multicpr/ecom"
-        query_fpath = os.path.join(data_dir, "ecom_dev_query.tsv")
-        query_doc_rel_fpath = os.path.join(data_dir, "ecom_dev.tsv")
-        corpus_fpath = os.path.join(data_dir, "ecom_corpus.tsv")
-        return MultiCprRetrievalDataset(query_fpath, query_doc_rel_fpath, corpus_fpath)
-    if dataset_name == 'multicpr-ecom-test':
-        data_dir = "/data/jiangjie/FattyEmbedding/data/multicpr/ecom"
-        query_fpath = os.path.join(data_dir, "ecom_test_query.tsv")
-        query_doc_rel_fpath = os.path.join(data_dir, "ecom_test.tsv")
-        corpus_fpath = os.path.join(data_dir, "ecom_corpus.tsv")
-        return MultiCprRetrievalDataset(query_fpath, query_doc_rel_fpath, corpus_fpath)
-    if dataset_name == 'zkh-qts':
-        # query_fpath = "data/retrieval_eval/test_lines_sampled.jsonl"
-        # corpus_fpath = "data/retrieval_eval/candidates_sampled.jsonl"
-        query_fpath = "/data/jiangjie/zkh_search_r1/data/embed/benchmark/full_benchmark.jsonl"
-        corpus_fpath = "/data/jiangjie/zkh_search_r1/data/embed/benchmark/full_corpus.jsonl"
+    if dataset_name == 'qts_benchmark':
+        from EmbedBoost.evaluate.qts_dataset import QTSRetrievalEvalDataset
+        query_fpath = os.path.join(BASE_DATA_DIR, dataset_name, "full_benchmark.jsonl")
+        corpus_fpath = os.path.join(BASE_DATA_DIR, dataset_name, "full_corpus.jsonl")
         return QTSRetrievalEvalDataset(query_fpath, corpus_fpath)
-    
     raise ValueError(f"Invalid dataset name: {dataset_name}")
 
 
@@ -281,7 +267,6 @@ def main():
     )
     embedder.to(args.device)
     embedder.eval()
-    # return
 
     eval_dataset = get_eval_dataset(args.dataset_name)
     # 构建vector store
@@ -289,11 +274,13 @@ def main():
         args.milvus_db_uri, col_name=args.collection_name, use_dense=embedder.use_dense,
         dense_dim=embedder.infer_dense_dim, use_sparse=embedder.use_sparse
     )
+
+    # 加载querys and docs
+    query_list, doc_list = eval_dataset.load_datas(query_line_limit=args.query_line_limit, corpus_line_limit=args.corpus_line_limit)
     
     # 插入文档
     if args.do_insert:
         mode = "overwrite" if args.overwrite_collection else "append"
-        doc_list, _ = eval_dataset.load_corpus(return_list=True, line_limit=args.corpus_line_limit)
         vector_store.insert_docs(doc_list, embedder, args.max_doc_length, args.insert_batch_size, mode=mode)
 
     retrieval_modes = []
@@ -301,14 +288,12 @@ def main():
         retrieval_modes.append("dense")
     if embedder.use_sparse:
         retrieval_modes.append("sparse")
-    
-    query_list = eval_dataset.load_querys()
-    if args.query_line_limit > 0:
-        query_list = query_list[:args.query_line_limit]
 
     topk_list = [int(x) for x in args.topk_list.split(",")]
     topk = max(topk_list)
     retrieved_results = retrieve(query_list, embedder, vector_store, retrieval_modes, max_query_length=args.max_query_length, topk=topk, merge_strategy='rrf')
+    # print(json.dumps(query_list[:5], ensure_ascii=False))
+    # print(json.dumps(retrieved_results[:5], ensure_ascii=False))
     
     if args.do_eval:
         metric_dict = evaluate_metric.compute_metrics(retrieved_results, topk_list=topk_list, metric_list=["recall@k", "mrr@k", "ndcg@k"])
@@ -325,3 +310,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -179,36 +179,35 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
             token_weights_list.append({id: vals[j] for j, id in enumerate(ids[i].tolist()) if id not in unused_tokens})
         return token_weights_list
     
-    # def sparse_embedding(self, last_hidden_state, input_ids):
-    #     """Compute and return the sparse embedding.
+    def uneffect_sparse_embedding(self, last_hidden_state, input_ids):
+        """Compute and return the sparse embedding.
 
-    #     Args:
-    #         hidden_state (torch.Tensor): The model output's last hidden state.
-    #         input_ids (_type_): Ids from input features.
+        Args:
+            hidden_state (torch.Tensor): The model output's last hidden state.
+            input_ids (_type_): Ids from input features.
 
-    #     Returns:
-    #         torch.Tensor: The sparse embedding or just the token weights.
-    #     """
-    #     token_weights = torch.relu(self.sparse_linear(last_hidden_state))
-    #     sparse_embedding = torch.zeros(
-    #         input_ids.size(0), input_ids.size(1), self.vocab_size,
-    #         dtype=token_weights.dtype,
-    #         device=token_weights.device
-    #     )
-    #     sparse_embedding = torch.scatter(sparse_embedding, dim=-1, index=input_ids.unsqueeze(-1), src=token_weights)
+        Returns:
+            torch.Tensor: The sparse embedding or just the token weights.
+        """
+        token_weights = torch.relu(self.sparse_linear(last_hidden_state))
+        sparse_embedding = torch.zeros(
+            input_ids.size(0), input_ids.size(1), self.vocab_size,
+            dtype=token_weights.dtype,
+            device=token_weights.device
+        )
+        sparse_embedding = torch.scatter(sparse_embedding, dim=-1, index=input_ids.unsqueeze(-1), src=token_weights)
 
-    #     unused_tokens = [
-    #         self.tokenizer.cls_token_id, 
-    #         self.tokenizer.mask_token_id,
-    #         self.tokenizer.pad_token_id,
-    #         self.tokenizer.unk_token_id,
-    #     ]
-    #     sparse_embedding = torch.max(sparse_embedding, dim=1).values
-    #     sparse_embedding[:, unused_tokens] *= 0.
-    #     return sparse_embedding
+        unused_tokens = [
+            self.tokenizer.cls_token_id, 
+            self.tokenizer.mask_token_id,
+            self.tokenizer.pad_token_id,
+            self.tokenizer.unk_token_id,
+        ]
+        sparse_embedding = torch.max(sparse_embedding, dim=1).values
+        sparse_embedding[:, unused_tokens] *= 0.
+        return sparse_embedding
 
     def sparse_embedding(self, last_hidden_state, input_ids):
-        # self.sparse_unused_tokens.to(input_ids.device)
         token_weights = torch.relu(self.sparse_linear(last_hidden_state))
         token_weights = token_weights.squeeze(-1)
         cond = (
@@ -218,12 +217,11 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
             (input_ids != self.tokenizer.unk_token_id) & \
             (input_ids != self.tokenizer.sep_token_id)
         )
-        # cond = (input_ids >= 5)
         mask = cond.nonzero(as_tuple=True)
         indices = torch.stack([mask[0], input_ids[mask]], dim=0)
         values = token_weights[mask]
-        # print(indices.shape, values.shape)
         sparse_maxtrix = torch.sparse_coo_tensor(indices, values, size=(input_ids.shape[0], self.vocab_size))
+        # no need
         # sparse_maxtrix = sparse_maxtrix.coalesce()
         return sparse_maxtrix
 
@@ -272,7 +270,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
         attention_mask = bert_inputs.get('attention_mask', None)
         token_type_ids = bert_inputs.get('token_type_ids', None)
         
-        model_out = self.encoder(input_ids, attention_mask, token_type_ids).last_hidden_state
+        model_out = self.encoder(input_ids, attention_mask, token_type_ids)
         last_hidden_state = model_out.last_hidden_state
 
         return self.cached_forward(last_hidden_state, input_ids, attention_mask, return_sparse_weights=return_sparse_weights)
@@ -319,7 +317,6 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
         if len(texts) == 0:
             return None
         
-        
         device = next(self.parameters()).device
 
         if max_length == -1:
@@ -356,11 +353,12 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
         
         ret_dict = {}
         
-        if len(attention_mask_list) == 1:
-            attention_mask = attention_mask_list[0]
-        elif len(dense_vecs_list) > 1:
-            attention_mask = torch.cat(attention_mask_list, dim=0)
-        ret_dict['attention_mask'] = attention_mask
+        #if len(attention_mask_list) == 1:
+        #    attention_mask = attention_mask_list[0]
+        #elif len(attention_mask_list) > 1:
+        #    # 这里，每个attention_mask的shape不一样，无法concat
+        #    attention_mask = torch.cat(attention_mask_list, dim=0)
+        #ret_dict['attention_mask'] = attention_mask
 
         if len(dense_vecs_list) > 0:
             if len(dense_vecs_list) == 1:
