@@ -109,10 +109,15 @@ class MultiInfoNCELoss(nn.Module):
                 loss += 0.1 * sparse_loss
             
             if 'colbert_vectors' in q_vectors_dict and 'colbert_vectors' in p_vectors_dict:
+                # colbert_vectors: [bsz, seq_len, colbert_dim]
+                # token_scores: [bsz, seq_len, bsz, seq_len]
                 token_scores = torch.einsum('qin,pjn->qipj', q_vectors_dict['colbert_vectors'], p_vectors_dict['colbert_vectors'])
+                # colbert_scores: [bsz, seq_len, bsz]
                 colbert_scores, _ = token_scores.max(-1)
+                # colbert_scores: [bsz, bsz]
                 colbert_scores = colbert_scores.sum(1) / q_vectors_dict['attention_mask'][:, 1:].sum(-1, keepdim=True)
                 colbert_scores = colbert_scores / temperature
+
                 ensemble_score_list.append(colbert_scores)
                 colbert_loss = F.cross_entropy(colbert_scores, targets, reduction='mean')
                 loss += colbert_loss
@@ -124,4 +129,3 @@ class MultiInfoNCELoss(nn.Module):
                 loss = loss / (len(ensemble_score_list) + 1)
             
             return loss
-            

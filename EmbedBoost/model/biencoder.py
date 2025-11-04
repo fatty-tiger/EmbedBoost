@@ -29,11 +29,11 @@ class BiEncoder:
         self.get_rep_fn = get_rep_fn
     
     def __call__(self, q_inputs, p_inputs, n_inputs, model_kwargs, loss_kwargs):
-        q_encoded = self.q_model(q_inputs, **model_kwargs)
-        p_encoded = self.p_model(p_inputs, **model_kwargs)
+        q_encoded = self.q_model(**q_inputs, **model_kwargs)
+        p_encoded = self.p_model(**p_inputs, **model_kwargs)
         n_encoded = None
         if n_inputs is not None:
-            n_encoded = self.p_model(n_inputs, **model_kwargs)
+            n_encoded = self.p_model(**n_inputs, **model_kwargs)
         loss = self.loss_fn(q_encoded, p_encoded, n_encoded, **loss_kwargs)
         loss.backward()
         return loss
@@ -283,5 +283,7 @@ class BiEncoderWithGradCache:
                 reps = self.get_reps(y)
 
                 surrogate = torch.dot(reps.flatten(), gradient.flatten())
-
+                # maybe your embed model's parameters are not trainable
+                if not surrogate.requires_grad and surrogate.grad_fn is None:
+                    break
                 surrogate.backward()

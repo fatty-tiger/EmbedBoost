@@ -265,11 +265,10 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
 
         return res
     
-    def forward(self, bert_inputs, return_sparse_weights=False):
-        input_ids = bert_inputs['input_ids']
-        attention_mask = bert_inputs.get('attention_mask', None)
-        token_type_ids = bert_inputs.get('token_type_ids', None)
-        
+    def forward(self, input_ids, attention_mask, token_type_ids, return_sparse_weights=False):
+        # input_ids = bert_inputs['input_ids']
+        # attention_mask = bert_inputs.get('attention_mask', None)
+        # token_type_ids = bert_inputs.get('token_type_ids', None)
         model_out = self.encoder(input_ids, attention_mask, token_type_ids)
         last_hidden_state = model_out.last_hidden_state
 
@@ -338,7 +337,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                 ).to(device)
 
                 res = self.forward(
-                    encoded,
+                    **encoded,
                     return_sparse_weights=True
                 )
                 attention_mask_list.append(encoded['attention_mask'])
@@ -423,6 +422,56 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
             logger.info(f"colbert_linear linear saved to {os.path.join(output_dir, 'colbert_linear.pt')}")
 
 
+class BGEM3EmbedderForInference(BGEM3Embedder):
+    def __init__(self, *args, **kwargs):
+        super(BGEM3EmbedderForInference, self).__init__( *args, **kwargs)
+    
+    def sparse_weights(self, last_hidden_state):
+        """Compute and return the sparse embedding.
+
+        Args:
+            hidden_state (torch.Tensor): The model output's last hidden state.
+            input_ids (_type_): Ids from input features.
+            return_embedding (bool, optional): If True, return the computed embedding, otherwise just return the token weights. 
+                Defaults to ``True``.
+
+        Returns:
+            torch.Tensor: The sparse embedding or just the token weights.
+        """
+        unused_tokens = [
+            self.tokenizer.unk_token_id,
+            self.tokenizer.pad_token_id
+        ]
+        if hasattr(self.tokenizer, 'cls_token_id'):
+            unused_tokens.append(self.tokenizer.cls_token_id)
+        if hasattr(self.tokenizer, 'mask_token_id'):
+            unused_tokens.append(self.tokenizer.mask_token_id)
+        if hasattr(self.tokenizer, 'bos_token_id'):
+            unused_tokens.append(self.tokenizer.bos_token_id)
+        if hasattr(self.tokenizer, 'eos_token_id'):
+            unused_tokens.append(self.tokenizer.eos_token_id)
+        if hasattr(self.tokenizer, 'sep_token_id'):
+            unused_tokens.append(self.tokenizer.sep_token_id)
+
+        token_weights = torch.relu(self.sparse_linear(last_hidden_state)).squeeze(-1)
+        return token_weights
+
+    def forward(self, input_ids, attention_mask, token_type_ids):
+        model_out = self.encoder(input_ids, attention_mask, token_type_ids)
+        last_hidden_state = model_out.last_hidden_state
+        dense_vectors = self.dense_embedding(last_hidden_state, attention_mask)
+        dense_vectors = F.normalize(dense_vectors, dim=-1)
+        
+        if self.use_sparse:
+            sparse_vectors = self.sparse_weights(last_hidden_state)
+        else:
+            sparse_vectors = torch.zeros(input_ids.shape, dtype=torch.float32, device=input_ids.device)
+        
+        # input_ids = input_ids.cpu().numpy()
+        # dense_vectors = dense_vectors.cpu().numpy()
+        return input_ids, dense_vectors, sparse_vectors
+
+
 class OnnxInferer(object):
     def __init__(self, model_id_or_path, device='cpu'):
         self.tokenizer = AutoTokenizer.from_pretrained(model_id_or_path)
@@ -438,16 +487,22 @@ class OnnxInferer(object):
                                                         providers=providers)
         logging.info("onnx inference session created")
 
-    def encode(self, query_list, batch_size=128, max_length=128, do_normalize=True):
+    def encode(self, query_list, batch_size=128, max_length=128):
         ret_dict = {}
 
-        vector_list = []
+        input_ids_list = []
+        dense_vector_list = []
+        sparse_vector_list = []
         total = int(math.ceil(len(query_list) / batch_size))
         for idx, batch_texts in tqdm(batch_generator(query_list, batch_size), total=total):
             encoded = self.tokenizer(batch_texts, max_length=max_length, padding=True, truncation=True, return_tensors='np')
             onnx_inputs = {k: v for k, v in encoded.items()}
             onnx_outputs = self.ort_session.run(None, onnx_inputs)
-            vector_list.append(onnx_outputs[1])
-        ret_dict['dense_vectors'] = np.concatenate(vector_list, axis=0)
+            input_ids_list.append(onnx_outputs[0])
+            dense_vector_list.append(onnx_outputs[1])
+            sparse_vector_list.append(onnx_outputs[2])
+        ret_dict['token_ids'] = np.concatenate(input_ids_list, axis=0)
+        ret_dict['dense_vectors'] = np.concatenate(dense_vector_list, axis=0)
+        ret_dict['sparse_vectors'] = np.concatenate(sparse_vector_list, axis=0)
         return ret_dict
     

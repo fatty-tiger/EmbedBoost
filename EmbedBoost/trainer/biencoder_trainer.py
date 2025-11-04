@@ -55,6 +55,8 @@ def report_epoch_loss(epoch, step, avg_loss_dict):
 
 
 def train(args):
+    p_model_trainable = True
+
     device = torch.device(args.device)
     q_model = BGEM3Embedder(
         args.q_model_name_or_path, 
@@ -78,9 +80,18 @@ def train(args):
             use_colbert=args.use_colbert,
             colbert_dim=args.colbert_dim
         )
+        
         p_model.to(device)
         p_tokenizer = p_model.tokenizer
-        optimizer = torch.optim.AdamW(chain(q_model.parameters(), p_model.parameters()), lr=args.learning_rate)
+        
+        # 冻结doc侧模型参数
+        if not p_model_trainable:
+            for param in p_model.parameters():
+                param.requires_grad = False
+            optimizer = torch.optim.AdamW(q_model.parameters(), lr=args.learning_rate)
+        else:
+            optimizer = torch.optim.AdamW(chain(q_model.parameters(), p_model.parameters()), lr=args.learning_rate)
+
     else:
         p_model = q_model
         p_tokenizer = q_tokenizer
@@ -110,10 +121,12 @@ def train(args):
         json.dump(args_dict, wr, indent=4, ensure_ascii=False)
 
     q_model.train()
-    p_model.train()
+    if p_model_trainable:
+        p_model.train()
     if args.gradient_checkpointing:
         q_model.gradient_checkpointing_enable()
-        p_model.gradient_checkpointing_enable()
+        if p_model_trainable:
+            p_model.gradient_checkpointing_enable()
 
     if args.gradient_cache:
         biencoder = BiEncoderWithGradCache(
@@ -168,7 +181,7 @@ def train(args):
                     os.makedirs(q_save_dir)
                 q_model.save(q_save_dir)
 
-                if args.p_model_name_or_path is not None:
+                if args.p_model_name_or_path is not None and p_model_trainable:
                     p_save_dir = os.path.join(save_dir, "p_model")
                     if not os.path.exists(p_save_dir):
                         os.makedirs(p_save_dir)
@@ -183,7 +196,7 @@ def train(args):
                 os.makedirs(q_save_dir)
             q_model.save(q_save_dir)
             
-            if args.p_model_name_or_path is not None:
+            if args.p_model_name_or_path is not None and p_model_trainable:
                 p_save_dir = os.path.join(save_dir, "p_model")
                 if not os.path.exists(p_save_dir):
                     os.makedirs(p_save_dir)

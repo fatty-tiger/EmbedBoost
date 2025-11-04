@@ -16,7 +16,6 @@ from EmbedBoost.model.bgem3 import BGEM3Embedder
 from EmbedBoost.abc.vectordb_base import BaseVectorStore
 from EmbedBoost.vectordb.milvus_db import MilvusVectorStore
 from EmbedBoost.evaluate import evaluate_metric
-from EmbedBoost.common.tensor_util import normalize_vectors
 
 
 LOG_DATE_FMT = '%Y‐%m‐%d %H:%M:%S'
@@ -27,7 +26,7 @@ logging.basicConfig(level=logging.INFO,
                     format=LOG_FMT)
 logger = logging.getLogger(__name__)
 
-BASE_DATA_DIR = "/home/jiangjie/zkh_search_r1/FattyEmbedding/data"
+BASE_DATA_DIR = "/data/jiangjie/zkh_search_r1/FattyEmbedding/data"
 
 
 def rrf_ranking(sorted_lists, topk, rank_constant=60):
@@ -126,8 +125,14 @@ def main():
     parser = argparse.ArgumentParser(description="评估句子嵌入模型的命令行脚本")
     
     parser.add_argument(
-        "--model_name_or_path",
+        "--q_model_name_or_path",
         type=str,
+        help="预训练模型路径或HuggingFace模型名称"
+    )
+    parser.add_argument(
+        "--p_model_name_or_path",
+        type=str,
+        default=None,
         help="预训练模型路径或HuggingFace模型名称"
     )
     parser.add_argument(
@@ -158,6 +163,17 @@ def main():
         "--use_sparse",
         action="store_true",
         help="使用稀疏向量"
+    )
+    parser.add_argument(
+        "--use_colbert",
+        action="store_true",
+        help="use_colbert (默认: false)"
+    )
+    parser.add_argument(
+        "--colbert_dim",
+        type=int,
+        default=64,
+        help="colbert_dim"
     )
     parser.add_argument(
         "--use_mrl",
@@ -255,24 +271,50 @@ def main():
     for key, value in vars(args).items():
         print(f"  {key}: {value}")
     
-    embedder = BGEM3Embedder(
-        args.model_name_or_path,
+    # embedder = BGEM3Embedder(
+    #     args.model_name_or_path,
+    #     use_dense=args.use_dense,
+    #     dense_pooling=args.dense_pooling,
+    #     dense_dim=args.dense_dim,
+    #     infer_dense_dim=args.infer_dense_dim if args.infer_dense_dim > 0 else args.dense_dim,
+    #     use_sparse=args.use_sparse,
+    #     use_mrl=args.use_mrl,
+    #     mrl_dims=args.mrl_dims,
+    # )
+    # embedder.to(args.device)
+    # embedder.eval()
+    q_model = BGEM3Embedder(
+        args.q_model_name_or_path, 
         use_dense=args.use_dense,
         dense_pooling=args.dense_pooling,
         dense_dim=args.dense_dim,
-        infer_dense_dim=args.infer_dense_dim if args.infer_dense_dim > 0 else args.dense_dim,
         use_sparse=args.use_sparse,
-        use_mrl=args.use_mrl,
-        mrl_dims=args.mrl_dims,
+        use_colbert=args.use_colbert,
+        colbert_dim=args.colbert_dim
     )
-    embedder.to(args.device)
-    embedder.eval()
+    q_model.to(args.device)
+    q_model.eval()
+
+    if args.p_model_name_or_path is not None:
+        p_model = BGEM3Embedder(
+            args.p_model_name_or_path, 
+            use_dense=args.use_dense,
+            dense_pooling=args.dense_pooling,
+            dense_dim=args.dense_dim,
+            use_sparse=args.use_sparse,
+            use_colbert=args.use_colbert,
+            colbert_dim=args.colbert_dim
+        )
+        p_model.to(args.device)
+    else:
+        p_model = q_model
+
 
     eval_dataset = get_eval_dataset(args.dataset_name)
     # 构建vector store
     vector_store = MilvusVectorStore(
-        args.milvus_db_uri, col_name=args.collection_name, use_dense=embedder.use_dense,
-        dense_dim=embedder.infer_dense_dim, use_sparse=embedder.use_sparse
+        args.milvus_db_uri, col_name=args.collection_name, use_dense=p_model.use_dense,
+        dense_dim=p_model.infer_dense_dim, use_sparse=p_model.use_sparse
     )
 
     # 加载querys and docs
@@ -281,17 +323,17 @@ def main():
     # 插入文档
     if args.do_insert:
         mode = "overwrite" if args.overwrite_collection else "append"
-        vector_store.insert_docs(doc_list, embedder, args.max_doc_length, args.insert_batch_size, mode=mode)
+        vector_store.insert_docs(doc_list, p_model, args.max_doc_length, args.insert_batch_size, mode=mode)
 
     retrieval_modes = []
-    if embedder.use_dense:
+    if q_model.use_dense:
         retrieval_modes.append("dense")
-    if embedder.use_sparse:
+    if q_model.use_sparse:
         retrieval_modes.append("sparse")
 
     topk_list = [int(x) for x in args.topk_list.split(",")]
     topk = max(topk_list)
-    retrieved_results = retrieve(query_list, embedder, vector_store, retrieval_modes, max_query_length=args.max_query_length, topk=topk, merge_strategy='rrf')
+    retrieved_results = retrieve(query_list, q_model, vector_store, retrieval_modes, max_query_length=args.max_query_length, topk=topk, merge_strategy='rrf')
     # print(json.dumps(query_list[:5], ensure_ascii=False))
     # print(json.dumps(retrieved_results[:5], ensure_ascii=False))
     
