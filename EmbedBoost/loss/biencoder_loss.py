@@ -73,13 +73,14 @@ logger = logging.getLogger(__name__)
 #             # logger.info(f"scores: {scores.shape}, targets: {targets.shape}")
 #             loss = F.cross_entropy(scores, targets, reduction='mean')
 #             return loss
-        
+
 
 class MultiInfoNCELoss(nn.Module):
     def __init__(self):
         super(MultiInfoNCELoss, self).__init__()
 
-    def forward(self, q_vectors_dict, p_vectors_dict, n_vectors_dict, temperature=0.05, self_distill=False):
+    def forward(self, q_vectors_dict, p_vectors_dict, n_vectors_dict, temperature=0.05,
+                step=0, colbert_chunk_size=0, self_distill=False, self_distill_steps=-1):
         bsz = 0
         device = None
         for k in ['dense_vectors', 'sparse_vectors', 'colbert_vectors']:
@@ -109,15 +110,30 @@ class MultiInfoNCELoss(nn.Module):
                 loss += 0.1 * sparse_loss
             
             if 'colbert_vectors' in q_vectors_dict and 'colbert_vectors' in p_vectors_dict:
-                # colbert_vectors: [bsz, seq_len, colbert_dim]
-                # token_scores: [bsz, seq_len, bsz, seq_len]
-                token_scores = torch.einsum('qin,pjn->qipj', q_vectors_dict['colbert_vectors'], p_vectors_dict['colbert_vectors'])
-                # colbert_scores: [bsz, seq_len, bsz]
-                colbert_scores, _ = token_scores.max(-1)
-                # colbert_scores: [bsz, bsz]
-                colbert_scores = colbert_scores.sum(1) / q_vectors_dict['attention_mask'][:, 1:].sum(-1, keepdim=True)
-                colbert_scores = colbert_scores / temperature
-
+                if colbert_chunk_size > 0:
+                    # chunked colbert_scores
+                    bsz = q_vectors_dict['colbert_vectors'].shape[0]
+                    scores_list = []
+                    for i in range(0, bsz, colbert_chunk_size):
+                        end_i = min(i + colbert_chunk_size, bsz)
+                        chunk_vector = q_vectors_dict['colbert_vectors'][i: end_i]  # [chunk_size, seq_len, dim]
+                        chunk_mask = q_vectors_dict['attention_mask'][i: end_i]
+                        # Compute scores for this chunk
+                        # shape: chunk_size, seq_len, bsz, seq_len
+                        scores = torch.einsum('qin,pjn->qipj', chunk_vector, p_vectors_dict['colbert_vectors']).max(-1)[0].sum(1)
+                        scores = scores / chunk_mask[:, 1:].sum(-1, keepdim=True)
+                        scores_list.append(scores)
+                    colbert_scores = torch.cat(scores_list, dim=0)
+                    colbert_scores = colbert_scores / temperature
+                else:
+                    # colbert_vectors: [bsz, seq_len, colbert_dim]
+                    # token_scores: [bsz, seq_len, bsz, seq_len]
+                    token_scores = torch.einsum('qin,pjn->qipj', q_vectors_dict['colbert_vectors'], p_vectors_dict['colbert_vectors'])
+                    # colbert_scores: [bsz, seq_len, bsz]
+                    colbert_scores, _ = token_scores.max(-1)
+                    # colbert_scores: [bsz, bsz]
+                    colbert_scores = colbert_scores.sum(1) / q_vectors_dict['attention_mask'][:, 1:].sum(-1, keepdim=True)
+                    colbert_scores = colbert_scores / temperature
                 ensemble_score_list.append(colbert_scores)
                 colbert_loss = F.cross_entropy(colbert_scores, targets, reduction='mean')
                 loss += colbert_loss
@@ -128,4 +144,18 @@ class MultiInfoNCELoss(nn.Module):
                 loss += ensemble_loss
                 loss = loss / (len(ensemble_score_list) + 1)
             
+            # if self_distill and self_distill_steps >= step:
+            if self_distill and step >= self_distill_steps:
+                teacher_targets = torch.softmax(ensemble_scores.detach(), dim=-1)
+                if 'dense_vectors' in q_vectors_dict and 'dense_vectors' in p_vectors_dict:
+                    dense_distill_loss = F.cross_entropy(dense_scores, teacher_targets, reduction='mean')
+                    loss += 0.1 * dense_distill_loss
+                if 'sparse_vectors' in q_vectors_dict and 'sparse_vectors' in p_vectors_dict:
+                    sparse_distill_loss = F.cross_entropy(sparse_scores, teacher_targets, reduction='mean')
+                    loss += 0.3 * sparse_distill_loss
+                if 'colbert_vectors' in q_vectors_dict and 'colbert_vectors' in p_vectors_dict:
+                    colbert_distill_loss = F.cross_entropy(colbert_scores, teacher_targets, reduction='mean')
+                    loss += 0.1 * colbert_distill_loss
+            
             return loss
+

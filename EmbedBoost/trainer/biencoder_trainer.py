@@ -54,6 +54,39 @@ def report_epoch_loss(epoch, step, avg_loss_dict):
     logger.info(message)
 
 
+def analyze_gpu_memory(q_model, optimizer, device):
+    print("=== 模型参数显存分析 ===")
+    param_size = sum(p.numel() * p.element_size() for p in q_model.parameters()) / 1024**2
+    print(f"模型参数显存: {param_size:.2f} MB")
+
+    print(f"\n=== 梯度显存分析 ===")
+    total_grad_size = 0
+    for name, param in q_model.named_parameters():
+        if param.grad is not None:
+            grad_size = param.grad.numel() * param.grad.element_size() / 1024 ** 2
+            total_grad_size += grad_size
+            # print(f"{name:30} | 梯度显存: {grad_size:.4f} MB")
+    print(f"梯度显存: {total_grad_size:.2f} MB")
+            
+    # analyze optimizer
+    print(f"\n=== 优化器状态显存分析 ===")
+    optimizer_state_size = 0
+    for param_group in optimizer.param_groups:
+        for param in param_group['params']:
+            if param in optimizer.state:
+                for state_name, state_tensor in optimizer.state[param].items():
+                    if torch.is_tensor(state_tensor):
+                        state_size = state_tensor.numel() * state_tensor.element_size()
+                        optimizer_state_size += state_size
+                        # print(f"optimizer-{state_name:30} | 显存: {state_size:.4f} MB")
+    print(f"优化器状态显存: {optimizer_state_size / 1024**2:.2f} MB")
+
+    print(f"\n=== GPU整体显存分析 ===")
+    print(f"当前显存使用: {torch.cuda.memory_allocated(device=device) / 1024**2:.2f} MB")
+    print(f"峰值显存使用: {torch.cuda.max_memory_allocated(device=device) / 1024**2:.2f} MB")
+    print(f"缓存分配器显存: {torch.cuda.memory_reserved(device=device) / 1024**2:.2f} MB")
+
+
 def train(args):
     p_model_trainable = True
 
@@ -153,7 +186,9 @@ def train(args):
     
     loss_kwargs = {
         'temperature': args.temperature,
-        'self_distill': False
+        'colbert_chunk_size': args.colbert_chunk_size,
+        'self_distill': args.self_distill,
+        'self_distill_steps': args.self_distill_steps,
         #'use_mrl': args.use_mrl,
         #'mrl_dims': args.mrl_dims,
         #'use_mrl_distill': args.use_mrl_distill,
@@ -161,14 +196,15 @@ def train(args):
     }
     for epoch in range(last_epoch+1, args.train_epochs+1):
         for batch_idx, (q_inputs, p_inputs, n_inputs) in enumerate(tqdm(train_dataloader, disable=args.disable_tqdm)):
+            step += 1
             q_inputs = {key: val.to(device) for key, val in q_inputs.items()}
             p_inputs = {key: val.to(device) for key, val in p_inputs.items()}
             if n_inputs:
                 n_inputs = {key: val.to(device) for key, val in n_inputs.items()}
             optimizer.zero_grad()
+            loss_kwargs['step'] = step
             loss = biencoder(q_inputs, p_inputs, n_inputs, model_kwargs, loss_kwargs)
             optimizer.step()
-            step += 1
             if step % args.log_steps == 0:
                 logger.info(f"Losses in epoch-{epoch}, step-{step}, total_loss: {loss.item():.4f}")
             
@@ -186,6 +222,10 @@ def train(args):
                     if not os.path.exists(p_save_dir):
                         os.makedirs(p_save_dir)
                     p_model.save(p_save_dir)
+            
+            # if step == 20:
+            #     analyze_gpu_memory(q_model, optimizer, device)
+            #     break
         
         if args.save_epochs > 0 and epoch % args.save_epochs == 0:
             save_dir = os.path.join(args.output_dir, f'ckp_epoch_{epoch}_step_{step}')
@@ -304,6 +344,12 @@ def main():
         help="colbert_dim"
     )
     parser.add_argument(
+        "--colbert_chunk_size",
+        type=int,
+        default=0,
+        help="colbert_chunk_size"
+    )
+    parser.add_argument(
         "--max_query_length",
         type=int,
         default=128,
@@ -374,6 +420,12 @@ def main():
         "--self_distill",
         action="store_true",
         help="使用自蒸馏 (默认: false)"
+    )
+    parser.add_argument(
+        "--self_distill_steps",
+        type=int,
+        default=-1,
+        help="self_distill_steps"
     )
     parser.add_argument(
         "--log_steps",

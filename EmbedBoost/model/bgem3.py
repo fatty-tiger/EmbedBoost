@@ -56,7 +56,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
                 self.dense_dim = mrl_dims[-1]
         logger.warn(f"use_mrl: {use_mrl}, mrl_dims: {mrl_dims}, infer_dense_dim: {infer_dense_dim}")
         
-        assert use_dense or use_sparse
+        # assert use_dense or use_sparse
 
         if use_dense:
             self.dense_linear = torch.nn.Linear(
@@ -265,7 +265,7 @@ class BGEM3Embedder(BaseEmbedder, nn.Module):
 
         return res
     
-    def forward(self, input_ids, attention_mask, token_type_ids, return_sparse_weights=False):
+    def forward(self, input_ids, attention_mask, token_type_ids=None, return_sparse_weights=False):
         # input_ids = bert_inputs['input_ids']
         # attention_mask = bert_inputs.get('attention_mask', None)
         # token_type_ids = bert_inputs.get('token_type_ids', None)
