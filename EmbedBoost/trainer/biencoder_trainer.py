@@ -26,31 +26,21 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 
-def report_loss(epoch, step, step_loss_dict):
-    total_loss = step_loss_dict['loss']
-    message = f"Losses in epoch-{epoch}, step-{step}, total_loss: {total_loss:.4f}"
-    if 'dense_loss' in step_loss_dict:
-        message += f", dense_loss: {step_loss_dict['dense_loss']:.4f}"
-    if 'sparse_loss' in step_loss_dict:
-        message += f", sparse_loss: {step_loss_dict['sparse_loss']:.4f}"
-    if 'dense_self_distill_loss' in step_loss_dict:
-        message += f", dense_self_distill_loss: {step_loss_dict['dense_self_distill_loss']:.4f}"
-    if 'sparse_self_distill_loss' in step_loss_dict:
-        message += f", sparse_self_distill_loss: {step_loss_dict['sparse_self_distill_loss']:.4f}"
-    logger.info(message)
-
-
-def report_epoch_loss(epoch, step, avg_loss_dict):
-    total_loss = avg_loss_dict['loss']
-    message = f"Avg Losses in epoch-{epoch}(step-{step}), total_loss: {total_loss:.4f}"
-    if 'dense_loss' in avg_loss_dict:
-        message += f", dense_loss: {avg_loss_dict['dense_loss']:.4f}"
-    if 'sparse_loss' in avg_loss_dict:
-        message += f", sparse_loss: {avg_loss_dict['sparse_loss']:.4f}"
-    if 'dense_self_distill_loss' in avg_loss_dict:
-        message += f", dense_self_distill_loss: {avg_loss_dict['dense_self_distill_loss']:.4f}"
-    if 'sparse_self_distill_loss' in avg_loss_dict:
-        message += f", sparse_self_distill_loss: {avg_loss_dict['sparse_self_distill_loss']:.4f}"
+def report_step_loss(epoch, step, loss_dict):
+    total_loss = loss_dict['total_loss']
+    message = f"Avg Losses in epoch-{epoch}(step-{step}), total_loss: {total_loss:.2f}"
+    if 'dense_loss' in loss_dict:
+        message += f", dense_loss: {loss_dict['dense_loss']:.2f}"
+    if 'sparse_loss' in loss_dict:
+        message += f", sparse_loss: {loss_dict['sparse_loss']:.2f}"
+    if 'splade_reg' in loss_dict:
+        message += f", splade_reg: {loss_dict['splade_reg']:.2f}"
+    if 'ensemble_loss' in loss_dict:
+        message += f", ensemble_loss: {loss_dict['ensemble_loss']:.2f}"
+    # if 'dense_self_distill_loss' in loss_dict:
+    #     message += f", dense_self_distill_loss: {loss_dict['dense_self_distill_loss']:.4f}"
+    # if 'sparse_self_distill_loss' in loss_dict:
+    #     message += f", sparse_self_distill_loss: {loss_dict['sparse_self_distill_loss']:.4f}"
     logger.info(message)
 
 
@@ -97,6 +87,7 @@ def train(args):
         dense_pooling=args.dense_pooling,
         dense_dim=args.dense_dim,
         use_sparse=args.use_sparse,
+        sparse_mode=args.sparse_mode,
         use_colbert=args.use_colbert,
         colbert_dim=args.colbert_dim
     )
@@ -110,6 +101,7 @@ def train(args):
             dense_pooling=args.dense_pooling,
             dense_dim=args.dense_dim,
             use_sparse=args.use_sparse,
+            sparse_mode=args.sparse_mode,
             use_colbert=args.use_colbert,
             colbert_dim=args.colbert_dim
         )
@@ -203,10 +195,11 @@ def train(args):
                 n_inputs = {key: val.to(device) for key, val in n_inputs.items()}
             optimizer.zero_grad()
             loss_kwargs['step'] = step
-            loss = biencoder(q_inputs, p_inputs, n_inputs, model_kwargs, loss_kwargs)
+            loss, extra_loss_dict = biencoder(q_inputs, p_inputs, n_inputs, model_kwargs, loss_kwargs)
             optimizer.step()
             if step % args.log_steps == 0:
-                logger.info(f"Losses in epoch-{epoch}, step-{step}, total_loss: {loss.item():.4f}")
+                report_step_loss(epoch, step, extra_loss_dict)
+                # logger.info(f"Losses in epoch-{epoch}, step-{step}, total_loss: {loss.item():.4f},  splade_reg: {splade_reg:.4f}")
             
             if args.save_steps > 0 and step % args.save_steps == 0:
                 save_dir = os.path.join(args.output_dir, f'ckp_epoch_{epoch}_step_{step}')
@@ -222,10 +215,6 @@ def train(args):
                     if not os.path.exists(p_save_dir):
                         os.makedirs(p_save_dir)
                     p_model.save(p_save_dir)
-            
-            # if step == 20:
-            #     analyze_gpu_memory(q_model, optimizer, device)
-            #     break
         
         if args.save_epochs > 0 and epoch % args.save_epochs == 0:
             save_dir = os.path.join(args.output_dir, f'ckp_epoch_{epoch}_step_{step}')
@@ -331,6 +320,12 @@ def main():
         "--use_sparse",
         action="store_true",
         help="使用稀疏向量 (默认: false)"
+    )
+    parser.add_argument(
+        "--sparse_mode",
+        type=str,
+        default="splade",
+        help="sparse_mode"
     )
     parser.add_argument(
         "--use_colbert",
